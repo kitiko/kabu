@@ -71,19 +71,20 @@ def normalize_text(text: str) -> str:
 # ==============================================================================
 
 STRATEGY_WEIGHTS = {
-    "⚖️ バランス型 (Balance)": {
+    "⚖️ バランス型（バランス）": {
         "safety": 0.25, "value": 0.25, "quality": 0.25, "growth": 0.25
     },
-    "💎 バリュー重視 (Value Focus)": {
+    "💎 バリュー重視（価値重視）": {
         "safety": 0.35, "value": 0.40, "quality": 0.20, "growth": 0.05
     },
-    "🚀 グロース重視 (Growth Focus)": {
+    "🚀 グロース重視（成長重視）": {
         "safety": 0.10, "value": 0.20, "quality": 0.35, "growth": 0.35
     },
-    "🛡️ 財務健全性重視 (Safety First)": {
+    "🛡️ 健全性重視（安全第一）": {
         "safety": 0.50, "value": 0.25, "quality": 0.15, "growth": 0.10
     }
 }
+
 
 # ==============================================================================
 # データ処理クラス
@@ -158,11 +159,18 @@ class IntegratedDataHandler:
 
     def get_html_soup(self, url: str) -> BeautifulSoup | None:
         logger.info(f"URLへのアクセスを開始: {url}")
+        
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8'
+            'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://www.google.com/',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0',
         }
+
         try:
             time.sleep(1.2)
             response = requests.get(url, headers=headers, timeout=10)
@@ -179,28 +187,49 @@ class IntegratedDataHandler:
             logger.error(f"HTMLの解析中に予期せぬエラーが発生しました: {url}, エラー: {e}")
             return None
 
+    # ▼▼▼ 修正箇所 ▼▼▼
     def get_risk_free_rate(self) -> float | None:
+        """Investing.comから日本の10年国債金利を取得する"""
         url = "https://jp.investing.com/rates-bonds/japan-10-year-bond-yield"
         logger.info(f"リスクフリーレート取得試行: {url}")
-        
-        soup = self.get_html_soup(url)
-        if soup:
-            try:
-                yield_span = soup.find('span', attrs={'data-test': 'instrument-price-last'})
-                if not yield_span:
-                        yield_span = soup.find('div', attrs={'data-test': 'instrument-price-last'})
-                
-                if yield_span:
-                    rate_text = yield_span.get_text(strip=True)
-                    rate = float(rate_text) / 100
-                    logger.info(f"リスクフリーレートの取得に成功しました: {rate:.4f}")
-                    return rate
-            except (ValueError, TypeError, AttributeError) as e:
-                logger.error(f"リスクフリーレートの解析に失敗しました。サイトの構造が変更された可能性があります。エラー: {e}")
-        
-        logger.warning("リスクフリーレートの自動取得に失敗しました。手動設定値を使用します。")
-        st.toast("⚠️ リスクフリーレートの自動取得に失敗しました。", icon="⚠️")
-        return None
+
+        # Webサイトになりすますためのヘッダー情報
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+
+        try:
+            # サイトにアクセスしてHTMLを取得
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()  # HTTPエラーがあれば例外を発生
+
+            # BeautifulSoupでHTMLを解析
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # 金利の数値が含まれる要素を特定 (ご指定のロジック)
+            # data-test="instrument-price-last" という属性を目印にする
+            yield_element = soup.find('div', attrs={'data-test': 'instrument-price-last'})
+            
+            if yield_element:
+                yield_str = yield_element.text.strip()
+                # 数値に変換して返す (元のアプリの仕様に合わせて100で割る)
+                rate = float(yield_str) / 100
+                logger.info(f"リスクフリーレートの取得に成功しました: {rate:.4f}")
+                return rate
+            else:
+                logger.error("金利データが見つかりませんでした。サイトの構造が変更された可能性があります。")
+                st.toast("⚠️ 金利データが見つかりませんでした。", icon="⚠️")
+                return None
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"ウェブサイトへのアクセスに失敗しました: {e}")
+            st.toast("⚠️ リスクフリーレートの取得に失敗しました。", icon="⚠️")
+            return None
+        except (ValueError, TypeError) as e:
+            logger.error(f"取得したデータの変換に失敗しました: {e}")
+            st.toast("⚠️ 取得データの変換に失敗しました。", icon="⚠️")
+            return None
+    # ▲▲▲ 修正箇所 ▲▲▲
     
     def parse_financial_value(self, s: str) -> int | float | None:
         s = str(s).replace(',', '').strip()
@@ -769,7 +798,7 @@ class IntegratedDataHandler:
                 )
                 result['strategy_scores'][name] = weighted_score
 
-            result['final_average_score'] = result['strategy_scores']['⚖️ バランス型 (Balance)']
+            result['final_average_score'] = result['strategy_scores']['⚖️ バランス型（バランス）']
 
             ts_df = self.get_timeseries_financial_metrics(ticker_obj, info)
             
@@ -826,7 +855,7 @@ def get_kiyohara_commentary(net_cash_ratio, cn_per, net_income):
     elif net_cash_ratio >= 0.01: nc_comment += "【要注意】🔴 ネットキャッシュがほとんどない状態です。すぐに危険というわけではありませんが、財務的なバッファーは小さいと言えます。特に、有利子負債の多い企業は、金利の上昇局面に注意が必要です。成長のための先行投資で一時的にこの水準になっている可能性もあります。"
     else: nc_comment += "【要警戒】🚨 実質的な現金よりも有利子負債が多い「ネットデット（純負債）」の状態。 清原氏のようなバリュー投資家が好む財務状況とは言えません。ただし、金融機関や、成長のために財務レバレッジを積極的に活用する企業（不動産業、IT関連など）では一般的です。事業内容や成長性を精査し、負債をコントロールできているかを厳しく見極める必要があります。"
 
-    cn_per_comment = "\n\n<br><br>\n\n### キャッシュニュートラルPER（CN-PER）の評価\n\n"
+    cn_per_comment = "\n\n<br><br>\n\n### キャッシュニュートラルPERの評価\n\n"
     
     if net_income is not None and net_income <= 0:
         if cn_per is not None and cn_per < 0:
@@ -887,6 +916,12 @@ mrp = st.sidebar.number_input("マーケットリスクプレミアム(MRP)", va
 analyze_button = st.sidebar.button("分析実行")
 
 st.title("統合型 企業価値分析ツール")
+
+# ▼▼▼ 改善点：デバッグ用のバージョン情報表示 ▼▼▼
+# これをコードの先頭付近に置くことで、コードが更新されているか一目でわかります
+st.caption(f"最終更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+# ▲▲▲ 改善点 ▲▲▲
+
 
 if 'results' not in st.session_state:
     st.session_state.results = None
@@ -958,7 +993,7 @@ if st.session_state.results:
 
     sorted_results = sorted(
         all_results.items(), 
-        key=lambda item: item[1]['strategy_scores'][selected_strategy], 
+        key=lambda item: item[1].get('strategy_scores', {}).get(selected_strategy, -1),
         reverse=True
     )
 
@@ -968,11 +1003,11 @@ if st.session_state.results:
                 st.error(f"分析中にエラーが発生しました。\n\n詳細: {result['error']}")
             continue 
 
-        score = result['strategy_scores'][selected_strategy]
+        score = result.get('strategy_scores', {}).get(selected_strategy)
         strategy_name = selected_strategy
 
-        stars_text = "⭐" * int(get_recommendation(score)[0].count('★')) + "☆" * int(get_recommendation(score)[0].count('☆'))
-        score_color = "#28a745" if score >= 70 else "#ffc107" if score >= 40 else "#dc3545"
+        stars_text = "⭐" * int(get_recommendation(score)[0].count('★')) + "☆" * int(get_recommendation(score)[0].count('☆')) if score is not None else "評価不能"
+        score_color = "#28a745" if score is not None and score >= 70 else "#ffc107" if score is not None and score >= 40 else "#dc3545"
         score_text = f"{score:.1f}" if score is not None else "N/A"
         
         st.markdown(f"<hr style='border: 2px solid {score_color}; border-radius: 2px;'>", unsafe_allow_html=True)
@@ -1020,7 +1055,7 @@ if st.session_state.results:
             copy_text = (
                 f"■ {display_key}\n"
                 f"{price_text}\n"
-                f"総合スコア ({strategy_name}): {score:.1f}点 {stars_text}\n"
+                f"総合スコア ({strategy_name}): {score_text}点 {stars_text}\n"
                 f"--------------------\n"
                 f"PEGレシオ (CAGR): {format_for_copy(peg_data)}\n"
                 f"ネットキャッシュ比率: {format_for_copy(nc_data)}\n"
@@ -1073,7 +1108,7 @@ if st.session_state.results:
             
             with st.expander("詳細データを見る"):
                 tabs = st.tabs([
-                    "時系列指標", "PEG計算", "NC比率計算", "キャッシュニュートラルPER計算", "ROIC計算", "WACC計算",
+                    "時系列指標", "PEGレシオ (CAGR) 計算", "ネットキャッシュ比率計算", "キャッシュニュートラルPER計算", "ROIC計算", "WACC計算",
                     "PEGレシオコメント", "専門家コメント", "財務諸表(バフェットコード)", "ヤフーファイナンス財務"
                 ])
                 
@@ -1091,8 +1126,8 @@ if st.session_state.results:
                     else:
                         st.warning("時系列データを取得できませんでした。")
 
-                with tabs[1]: # PEG計算
-                    st.subheader("PEG (CAGR) の計算過程")
+                with tabs[1]: # PEGレシオ (CAGR) 計算
+                    st.subheader("PEGレシオ (CAGR) の計算過程")
                     peg_analysis = result.get('peg_analysis', {})
                     peg_data = peg_analysis.get('cagr_growth', {})
                     
@@ -1118,7 +1153,7 @@ if st.session_state.results:
                     else:
                         st.warning('EPSデータが不足しています。')
 
-                with tabs[2]: # NC比率計算
+                with tabs[2]: # ネットキャッシュ比率計算
                     st.subheader("清原式ネットキャッシュ比率の計算過程")
                     nc_warnings = [w for w in result.get('warnings', []) if "NC比率" in w or "純有利子負債" in w or "有価証券" in w or "負債" in w]
                     if nc_warnings:
@@ -1135,7 +1170,7 @@ if st.session_state.results:
                     })
                 
                 with tabs[3]: # キャッシュニュートラルPER計算
-                    st.subheader("CN-PERの計算過程")
+                    st.subheader("キャッシュニュートラルPERの計算過程")
                     st.markdown(f"**計算式:** `実績PER * (1 - ネットキャッシュ比率)`")
                     formula = indicators.get('formulas', {}).get('キャッシュニュートラルPER', indicators.get('cn_per', {}).get('reason'))
                     st.text(formula)
