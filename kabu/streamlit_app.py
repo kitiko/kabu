@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
+# ▼▼▼ 修正箇所 ▼▼▼: requests の代わりに curl_cffi を使用
+from curl_cffi import requests as curl_requests
+import requests # get_risk_free_rate のために残す
 from bs4 import BeautifulSoup
 import logging
 import time
@@ -13,7 +15,7 @@ import matplotlib.pyplot as plt
 import japanize_matplotlib
 import pyperclip
 import unicodedata
-import random  # ▼▼▼ 修正箇所 ▼▼▼: ランダムな待機時間のために追加
+import random
 
 # ==============================================================================
 # 1. ログ設定
@@ -117,16 +119,27 @@ class IntegratedDataHandler:
         normalized_query = normalize_text(query)
         if not normalized_query:
             return None
-
-        matches = self.stock_list_df[self.stock_list_df['normalized_name'].str.contains(normalized_query, na=False)]
+            
+        # ▼▼▼ 参考: 検索ロジックの改善案 ▼▼▼
+        # より意図した銘柄を見つけるための改善案です。今回は適用していませんが、参考までに。
+        # 1. 完全一致を試す
+        exact_matches = self.stock_list_df[self.stock_list_df['normalized_name'] == normalized_query]
+        if not exact_matches.empty:
+            matches = exact_matches
+        else:
+            # 2. 部分一致（現状のロジック）
+            matches = self.stock_list_df[self.stock_list_df['normalized_name'].str.contains(normalized_query, na=False)]
 
         if not matches.empty:
             prime_matches = matches[matches['market'].str.contains('プライム', na=False)]
             if not prime_matches.empty:
-                stock_data = prime_matches.iloc[0]
+                # 検索クエリとの文字数の近さでソートして、最も近いものを選択
+                prime_matches['diff'] = prime_matches['normalized_name'].apply(lambda x: abs(len(x) - len(normalized_query)))
+                stock_data = prime_matches.sort_values(by='diff').iloc[0]
             else:
-                stock_data = matches.iloc[0]
-            
+                matches['diff'] = matches['normalized_name'].apply(lambda x: abs(len(x) - len(normalized_query)))
+                stock_data = matches.sort_values(by='diff').iloc[0]
+
             logger.info(f"検索クエリ '{query}' から銘柄 '{stock_data['name']} ({stock_data['code']})' を見つけました。")
             return stock_data.to_dict()
 
@@ -162,69 +175,30 @@ class IntegratedDataHandler:
     def get_html_soup(self, url: str) -> BeautifulSoup | None:
         """
         指定されたURLからHTMLを取得し、BeautifulSoupオブジェクトを返す。
-        ボット検出を回避するため、より精巧なヘッダーを使用し、ランダムな待機時間を設ける。
+        HTTP 405エラー対策として、curl_cffiライブラリを使用しブラウザを模倣する。
         """
-        logger.info(f"URLへのアクセスを開始: {url}")
-
-        # Streamlit Cloud環境でボットと誤認されるのを防ぐための偽装ヘッダー
-        # 一般的なWindows上のChromeブラウザからのアクセスを模倣
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-            'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://www.google.com/',  # 一般的な検索エンジンからの流入を装う
-            'DNT': '1',  # Do Not Trackを有効に
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            # Chromeブラウザが送信する追加ヘッダー (Client Hints)
-            'Sec-CH-UA': '"Not.A/Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
-            'Sec-CH-UA-Mobile': '?0', # デスクトップブラウザ
-            'Sec-CH-UA-Platform': '"Windows"',
-            # リクエストのコンテキストを示すSec-Fetchヘッダー
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'cross-site', # Refererがgoogle.comなのでcross-siteが適切
-            'Sec-Fetch-User': '?1', # ユーザーの操作によるナビゲーションを示す
-            'Cache-Control': 'max-age=0',
-        }
-
+        logger.info(f"URLへのアクセスを開始 (curl_cffi使用): {url}")
+        
         try:
             # 機械的なアクセスと判断されないよう、待機時間に揺らぎを持たせる
-            wait_time = random.uniform(1.8, 3.2)
+            wait_time = random.uniform(2.0, 4.0)
             logger.info(f"{wait_time:.2f}秒待機します...")
             time.sleep(wait_time)
             
-            # タイムアウトを少し長めに設定
-            response = requests.get(url, headers=headers, timeout=20)
+            # impersonateパラメータでブラウザの挙動（ヘッダー、TLSフィンガープリント等）を模倣する
+            response = curl_requests.get(url, impersonate="chrome120", timeout=25)
             
-            # HTTPエラー (4xx, 5xx) が発生した場合に例外を発生させる
+            # ステータスコードが200番台でない場合に例外を発生させる
             response.raise_for_status()
             
             logger.info(f"URLへのアクセス成功 (ステータスコード: {response.status_code}): {url}")
             return BeautifulSoup(response.content, 'html.parser')
 
-        except requests.exceptions.Timeout:
-            logger.error(f"URLへのアクセスがタイムアウトしました: {url}")
-            st.toast(f"タイムアウト: {url}", icon="⏳")
-            return None
-        except requests.exceptions.HTTPError as e:
-            # 特に403 Forbiddenエラーは、アクセスがブロックされた可能性が高い
-            status_code = e.response.status_code
-            logger.error(f"HTTPエラー ({status_code})が発生しました: {url}")
-            if status_code == 403:
-                st.error(f"アクセス拒否({status_code})。バフェットコード側でボットとして認識され、アクセスがブロックされました。時間をおいて再試行してください。")
-                logger.error("ヘッダー情報が古いか、アクセス元IPがブロックされている可能性があります。")
-            else:
-                st.error(f"HTTPエラー ({status_code})が発生しました。サイトがダウンしているか、URLが変更された可能性があります。")
-            return None
-        except requests.exceptions.RequestException as e:
-            logger.error(f"URLへのアクセス中にリクエスト例外が発生しました: {url}, エラー: {e}")
-            st.error(f"ネットワークエラーが発生しました: {e}")
-            return None
         except Exception as e:
-            logger.error(f"HTMLの解析中に予期せぬエラーが発生しました: {url}, エラー: {e}")
-            st.error("HTMLの解析中に予期せぬエラーが発生しました。")
+            # curl_cffi が出す可能性のある様々な例外をまとめて捕捉
+            logger.error(f"curl_cffiでのアクセス中にエラーが発生しました: {url}, エラー: {e}", exc_info=True)
+            # StreamlitのUIにエラーメッセージを表示
+            st.error(f"バフェットコードへのアクセスに失敗しました。サイト側のセキュリティ強化により、現在データを取得できません。(エラー詳細: {e})")
             return None
     # ▲▲▲ 修正箇所 ▲▲▲
 
@@ -806,11 +780,9 @@ class IntegratedDataHandler:
                     else:
                         logger.warning(f"Buffett-Codeから{statement}のデータ解析に失敗。")
                         result['buffett_code_data'][statement] = {}
-                        # ▼▼▼ 修正箇所 ▼▼▼: スクレイピング失敗時にエラーを投げる
-                        raise ValueError(f"バフェットコードからの{statement}データ取得・解析に失敗しました。サイト構造の変更やアクセスブロックの可能性があります。")
+                        raise ValueError(f"バフェットコードからの{statement}データ取得・解析に失敗しました。")
                 else:
-                    result['buffett_code_data'][statement] = {}
-                    # ▼▼▼ 修正箇所 ▼▼▼: スクレイピング失敗時にエラーを投げる
+                    # get_html_soup内でエラーがraiseされるかNoneが返るので、ここでさらにエラーを生成
                     raise ValueError(f"バフェットコード({url})へのアクセスに失敗しました。")
 
             yf_data_for_calc = {**info, **options}
