@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import japanize_matplotlib
 import pyperclip
 import unicodedata
+import random  # ▼▼▼ 修正箇所 ▼▼▼: ランダムな待機時間のために追加
 
 # ==============================================================================
 # 1. ログ設定
@@ -49,7 +50,7 @@ def load_jpx_stock_list():
         return pd.DataFrame(columns=['code', 'name', 'market', 'sector', 'normalized_name'])
     except Exception as e:
         if "xlrd" in str(e).lower():
-             st.error("Excelファイル(.xls)を読み込むためのライブラリ 'xlrd' がインストールされていません。ターミナルで `pip install xlrd` を実行してください。")
+            st.error("Excelファイル(.xls)を読み込むためのライブラリ 'xlrd' がインストールされていません。ターミナルで `pip install xlrd` を実行してください。")
         else:
             st.error(f"銘柄リストの読み込み中に予期せぬエラーが発生しました: {e}")
         return pd.DataFrame(columns=['code', 'name', 'market', 'sector', 'normalized_name'])
@@ -157,37 +158,76 @@ class IntegratedDataHandler:
         'Net Change In Cash': '現金の増減額', 'Free Cash Flow': 'フリーキャッシュフロー',
     }
 
+    # ▼▼▼ 修正箇所 ▼▼▼
     def get_html_soup(self, url: str) -> BeautifulSoup | None:
+        """
+        指定されたURLからHTMLを取得し、BeautifulSoupオブジェクトを返す。
+        ボット検出を回避するため、より精巧なヘッダーを使用し、ランダムな待機時間を設ける。
+        """
         logger.info(f"URLへのアクセスを開始: {url}")
-        
+
+        # Streamlit Cloud環境でボットと誤認されるのを防ぐための偽装ヘッダー
+        # 一般的なWindows上のChromeブラウザからのアクセスを模倣
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
             'Accept-Encoding': 'gzip, deflate, br',
-            'Referer': 'https://www.google.com/',
+            'Referer': 'https://www.google.com/',  # 一般的な検索エンジンからの流入を装う
+            'DNT': '1',  # Do Not Trackを有効に
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
+            # Chromeブラウザが送信する追加ヘッダー (Client Hints)
+            'Sec-CH-UA': '"Not.A/Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+            'Sec-CH-UA-Mobile': '?0', # デスクトップブラウザ
+            'Sec-CH-UA-Platform': '"Windows"',
+            # リクエストのコンテキストを示すSec-Fetchヘッダー
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site', # Refererがgoogle.comなのでcross-siteが適切
+            'Sec-Fetch-User': '?1', # ユーザーの操作によるナビゲーションを示す
             'Cache-Control': 'max-age=0',
         }
 
         try:
-            time.sleep(1.2)
-            response = requests.get(url, headers=headers, timeout=10)
+            # 機械的なアクセスと判断されないよう、待機時間に揺らぎを持たせる
+            wait_time = random.uniform(1.8, 3.2)
+            logger.info(f"{wait_time:.2f}秒待機します...")
+            time.sleep(wait_time)
+            
+            # タイムアウトを少し長めに設定
+            response = requests.get(url, headers=headers, timeout=20)
+            
+            # HTTPエラー (4xx, 5xx) が発生した場合に例外を発生させる
             response.raise_for_status()
+            
             logger.info(f"URLへのアクセス成功 (ステータスコード: {response.status_code}): {url}")
             return BeautifulSoup(response.content, 'html.parser')
+
         except requests.exceptions.Timeout:
             logger.error(f"URLへのアクセスがタイムアウトしました: {url}")
+            st.toast(f"タイムアウト: {url}", icon="⏳")
+            return None
+        except requests.exceptions.HTTPError as e:
+            # 特に403 Forbiddenエラーは、アクセスがブロックされた可能性が高い
+            status_code = e.response.status_code
+            logger.error(f"HTTPエラー ({status_code})が発生しました: {url}")
+            if status_code == 403:
+                st.error(f"アクセス拒否({status_code})。バフェットコード側でボットとして認識され、アクセスがブロックされました。時間をおいて再試行してください。")
+                logger.error("ヘッダー情報が古いか、アクセス元IPがブロックされている可能性があります。")
+            else:
+                st.error(f"HTTPエラー ({status_code})が発生しました。サイトがダウンしているか、URLが変更された可能性があります。")
             return None
         except requests.exceptions.RequestException as e:
-            logger.error(f"URLへのアクセス失敗: {url}, エラー: {e}")
+            logger.error(f"URLへのアクセス中にリクエスト例外が発生しました: {url}, エラー: {e}")
+            st.error(f"ネットワークエラーが発生しました: {e}")
             return None
         except Exception as e:
             logger.error(f"HTMLの解析中に予期せぬエラーが発生しました: {url}, エラー: {e}")
+            st.error("HTMLの解析中に予期せぬエラーが発生しました。")
             return None
+    # ▲▲▲ 修正箇所 ▲▲▲
 
-    # ▼▼▼ 修正箇所 ▼▼▼
     def get_risk_free_rate(self) -> float | None:
         """Investing.comから日本の10年国債金利を取得する"""
         url = "https://jp.investing.com/rates-bonds/japan-10-year-bond-yield"
@@ -229,7 +269,6 @@ class IntegratedDataHandler:
             logger.error(f"取得したデータの変換に失敗しました: {e}")
             st.toast("⚠️ 取得データの変換に失敗しました。", icon="⚠️")
             return None
-    # ▲▲▲ 修正箇所 ▲▲▲
     
     def parse_financial_value(self, s: str) -> int | float | None:
         s = str(s).replace(',', '').strip()
@@ -758,7 +797,8 @@ class IntegratedDataHandler:
             result['yf_info'] = info
             
             for statement, path in {"貸借対照表": "bs", "損益計算書": "pl"}.items():
-                soup = self.get_html_soup(f"https://www.buffett-code.com/company/{ticker_code}/financial/{path}")
+                url = f"https://www.buffett-code.com/company/{ticker_code}/financial/{path}"
+                soup = self.get_html_soup(url)
                 if soup:
                     all_data = self.extract_all_financial_data(soup)
                     if all_data:
@@ -766,9 +806,13 @@ class IntegratedDataHandler:
                     else:
                         logger.warning(f"Buffett-Codeから{statement}のデータ解析に失敗。")
                         result['buffett_code_data'][statement] = {}
+                        # ▼▼▼ 修正箇所 ▼▼▼: スクレイピング失敗時にエラーを投げる
+                        raise ValueError(f"バフェットコードからの{statement}データ取得・解析に失敗しました。サイト構造の変更やアクセスブロックの可能性があります。")
                 else:
                     result['buffett_code_data'][statement] = {}
-            
+                    # ▼▼▼ 修正箇所 ▼▼▼: スクレイピング失敗時にエラーを投げる
+                    raise ValueError(f"バフェットコード({url})へのアクセスに失敗しました。")
+
             yf_data_for_calc = {**info, **options}
             result['scoring_indicators'] = self._calculate_scoring_indicators(result['buffett_code_data'], yf_data_for_calc)
             result['warnings'].extend(result['scoring_indicators'].pop('calc_warnings', []))
@@ -859,9 +903,9 @@ def get_kiyohara_commentary(net_cash_ratio, cn_per, net_income):
     
     if net_income is not None and net_income <= 0:
         if cn_per is not None and cn_per < 0:
-             cn_per_comment += "【要注意株】🧐 「価値の罠」の可能性あり。事業が利益を生み出せていない赤字状態。どれだけ資産を持っていても、事業活動でそれを食いつぶしているかもしれません。赤字が一時的なものか、構造的なものか、その原因を詳しく調べる必要があります。"
+            cn_per_comment += "【要注意株】🧐 「価値の罠」の可能性あり。事業が利益を生み出せていない赤字状態。どれだけ資産を持っていても、事業活動でそれを食いつぶしているかもしれません。赤字が一時的なものか、構造的なものか、その原因を詳しく調べる必要があります。"
         else:
-             cn_per_comment += "【赤字企業・分析注意】事業が利益を生み出せていない赤字状態です。財務健全性（ネットキャッシュ比率）は重要ですが、事業そのものの将来性を慎重に評価する必要があります。"
+            cn_per_comment += "【赤字企業・分析注意】事業が利益を生み出せていない赤字状態です。財務健全性（ネットキャッシュ比率）は重要ですが、事業そのものの将来性を慎重に評価する必要があります。"
     elif cn_per is None: 
         cn_per_comment += "評価不能 (PER等のデータ不足のため計算不可)"
     elif cn_per < 0:
@@ -917,10 +961,7 @@ analyze_button = st.sidebar.button("分析実行")
 
 st.title("統合型 企業価値分析ツール")
 
-# ▼▼▼ 改善点：デバッグ用のバージョン情報表示 ▼▼▼
-# これをコードの先頭付近に置くことで、コードが更新されているか一目でわかります
 st.caption(f"最終更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-# ▲▲▲ 改善点 ▲▲▲
 
 
 if 'results' not in st.session_state:
@@ -1016,9 +1057,9 @@ if st.session_state.results:
         with col1:
             sector = result.get('sector', '')
             if sector and pd.notna(sector):
-                 st.markdown(f"### {display_key} <span style='font-size: 16px; color: grey; font-weight: normal; margin-left: 10px;'>({sector})</span>", unsafe_allow_html=True)
+                st.markdown(f"### {display_key} <span style='font-size: 16px; color: grey; font-weight: normal; margin-left: 10px;'>({sector})</span>", unsafe_allow_html=True)
             else:
-                 st.markdown(f"### {display_key}")
+                st.markdown(f"### {display_key}")
         
         with col2:
             info = result.get('yf_info', {})
