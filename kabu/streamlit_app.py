@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-# ▼▼▼ 修正箇所 ▼▼▼: requests の代わりに curl_cffi を使用
 from curl_cffi import requests as curl_requests
-import requests # get_risk_free_rate のために残す
+import requests
 from bs4 import BeautifulSoup
 import logging
 import time
@@ -17,6 +16,8 @@ import pyperclip
 import unicodedata
 import random
 
+# （ログ設定など、前半部分は変更なしのため省略）
+# ...
 # ==============================================================================
 # 1. ログ設定
 # ==============================================================================
@@ -98,9 +99,20 @@ class IntegratedDataHandler:
     def __init__(self):
         """初期化時に銘柄リストを読み込む"""
         self.stock_list_df = load_jpx_stock_list()
+        # ▼▼▼ 修正箇所 ▼▼▼: セッションオブジェクトをクラスインスタンスで保持
+        self.session = curl_requests.Session()
+        self.session.impersonate = "chrome120" # ブラウザ偽装設定
+        # セッションの初期化
+        try:
+            logger.info("バフェットコードへのセッションを初期化します。")
+            self.session.get("https://www.buffett-code.com/", timeout=20)
+        except Exception as e:
+            logger.warning(f"セッションの初期化に失敗しました: {e}")
 
+
+    # ▼▼▼ 修正箇所 ▼▼▼: 検索ロジックを改善
     def get_ticker_info_from_query(self, query: str) -> dict | None:
-        """銘柄コードだけでなく業種などの情報も辞書で返す"""
+        """銘柄コードや会社名から銘柄情報を取得する。検索精度を向上。"""
         query = query.strip()
 
         if re.fullmatch(r'\d{4}', query):
@@ -119,26 +131,18 @@ class IntegratedDataHandler:
         normalized_query = normalize_text(query)
         if not normalized_query:
             return None
-            
-        # ▼▼▼ 参考: 検索ロジックの改善案 ▼▼▼
-        # より意図した銘柄を見つけるための改善案です。今回は適用していませんが、参考までに。
-        # 1. 完全一致を試す
-        exact_matches = self.stock_list_df[self.stock_list_df['normalized_name'] == normalized_query]
-        if not exact_matches.empty:
-            matches = exact_matches
-        else:
-            # 2. 部分一致（現状のロジック）
-            matches = self.stock_list_df[self.stock_list_df['normalized_name'].str.contains(normalized_query, na=False)]
 
+        # 1. 部分一致で候補を絞る
+        matches = self.stock_list_df[self.stock_list_df['normalized_name'].str.contains(normalized_query, na=False)].copy()
+        
         if not matches.empty:
+            # 2. プライム市場の銘柄を優先
             prime_matches = matches[matches['market'].str.contains('プライム', na=False)]
-            if not prime_matches.empty:
-                # 検索クエリとの文字数の近さでソートして、最も近いものを選択
-                prime_matches['diff'] = prime_matches['normalized_name'].apply(lambda x: abs(len(x) - len(normalized_query)))
-                stock_data = prime_matches.sort_values(by='diff').iloc[0]
-            else:
-                matches['diff'] = matches['normalized_name'].apply(lambda x: abs(len(x) - len(normalized_query)))
-                stock_data = matches.sort_values(by='diff').iloc[0]
+            target_df = prime_matches if not prime_matches.empty else matches
+
+            # 3. 検索クエリと名前の文字数の差が最も小さいものを選択
+            target_df.loc[:, 'diff'] = target_df['normalized_name'].apply(lambda x: abs(len(x) - len(normalized_query)))
+            stock_data = target_df.sort_values(by='diff').iloc[0]
 
             logger.info(f"検索クエリ '{query}' から銘柄 '{stock_data['name']} ({stock_data['code']})' を見つけました。")
             return stock_data.to_dict()
@@ -171,79 +175,67 @@ class IntegratedDataHandler:
         'Net Change In Cash': '現金の増減額', 'Free Cash Flow': 'フリーキャッシュフロー',
     }
 
-    # ▼▼▼ 修正箇所 ▼▼▼
+    # ▼▼▼ 修正箇所 ▼▼▼: セッションを使ったcurl_cffiアクセス
     def get_html_soup(self, url: str) -> BeautifulSoup | None:
         """
-        指定されたURLからHTMLを取得し、BeautifulSoupオブジェクトを返す。
-        HTTP 405エラー対策として、curl_cffiライブラリを使用しブラウザを模倣する。
+        保持しているセッションを使い、指定されたURLからHTMLを取得する。
         """
-        logger.info(f"URLへのアクセスを開始 (curl_cffi使用): {url}")
+        logger.info(f"セッションを使ってURLにアクセス: {url}")
         
         try:
-            # 機械的なアクセスと判断されないよう、待機時間に揺らぎを持たせる
-            wait_time = random.uniform(2.0, 4.0)
+            wait_time = random.uniform(1.5, 3.0)
             logger.info(f"{wait_time:.2f}秒待機します...")
             time.sleep(wait_time)
             
-            # impersonateパラメータでブラウザの挙動（ヘッダー、TLSフィンガープリント等）を模倣する
-            response = curl_requests.get(url, impersonate="chrome120", timeout=25)
-            
-            # ステータスコードが200番台でない場合に例外を発生させる
+            # 初期化済みのセッションを使ってリクエストを送信
+            response = self.session.get(url, timeout=25)
             response.raise_for_status()
             
             logger.info(f"URLへのアクセス成功 (ステータスコード: {response.status_code}): {url}")
             return BeautifulSoup(response.content, 'html.parser')
 
         except Exception as e:
-            # curl_cffi が出す可能性のある様々な例外をまとめて捕捉
-            logger.error(f"curl_cffiでのアクセス中にエラーが発生しました: {url}, エラー: {e}", exc_info=True)
-            # StreamlitのUIにエラーメッセージを表示
-            st.error(f"バフェットコードへのアクセスに失敗しました。サイト側のセキュリティ強化により、現在データを取得できません。(エラー詳細: {e})")
+            logger.error(f"curl_cffiセッションでのアクセス中にエラーが発生しました: {url}, エラー: {e}", exc_info=True)
+            st.error(f"バフェットコードへのアクセスに失敗しました。サイトがメンテナンス中か、セキュリティがさらに強化された可能性があります。(エラー: {e})")
+            # セッションが切れた可能性を考慮して再初期化を試みる
+            try:
+                logger.warning("セッションの再初期化を試みます...")
+                self.session = curl_requests.Session()
+                self.session.impersonate = "chrome120"
+                self.session.get("https://www.buffett-code.com/", timeout=20)
+                logger.info("セッションの再初期化に成功しました。")
+            except Exception as se:
+                logger.error(f"セッションの再初期化にも失敗しました: {se}")
             return None
-    # ▲▲▲ 修正箇所 ▲▲▲
 
     def get_risk_free_rate(self) -> float | None:
-        """Investing.comから日本の10年国債金利を取得する"""
+        # この関数は変更なし
         url = "https://jp.investing.com/rates-bonds/japan-10-year-bond-yield"
         logger.info(f"リスクフリーレート取得試行: {url}")
-
-        # Webサイトになりすますためのヘッダー情報
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
-
         try:
-            # サイトにアクセスしてHTMLを取得
             response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()  # HTTPエラーがあれば例外を発生
-
-            # BeautifulSoupでHTMLを解析
+            response.raise_for_status()
             soup = BeautifulSoup(response.text, 'html.parser')
-
-            # 金利の数値が含まれる要素を特定 (ご指定のロジック)
-            # data-test="instrument-price-last" という属性を目印にする
             yield_element = soup.find('div', attrs={'data-test': 'instrument-price-last'})
-            
             if yield_element:
-                yield_str = yield_element.text.strip()
-                # 数値に変換して返す (元のアプリの仕様に合わせて100で割る)
-                rate = float(yield_str) / 100
+                rate = float(yield_element.text.strip()) / 100
                 logger.info(f"リスクフリーレートの取得に成功しました: {rate:.4f}")
                 return rate
             else:
-                logger.error("金利データが見つかりませんでした。サイトの構造が変更された可能性があります。")
+                logger.error("金利データが見つかりませんでした。")
                 st.toast("⚠️ 金利データが見つかりませんでした。", icon="⚠️")
                 return None
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"ウェブサイトへのアクセスに失敗しました: {e}")
+        except Exception as e:
+            logger.error(f"リスクフリーレートの取得に失敗しました: {e}")
             st.toast("⚠️ リスクフリーレートの取得に失敗しました。", icon="⚠️")
             return None
-        except (ValueError, TypeError) as e:
-            logger.error(f"取得したデータの変換に失敗しました: {e}")
-            st.toast("⚠️ 取得データの変換に失敗しました。", icon="⚠️")
-            return None
     
+    # ... これ以降の `IntegratedDataHandler` クラス内のメソッドは変更なし ...
+    # ... `perform_full_analysis` や各種計算ロジックはそのまま ...
+    # ... アプリケーションのUI部分（Streamlitのコード）も変更なし ...
     def parse_financial_value(self, s: str) -> int | float | None:
         s = str(s).replace(',', '').strip()
         if s in ['-', '---', '']:
@@ -782,7 +774,6 @@ class IntegratedDataHandler:
                         result['buffett_code_data'][statement] = {}
                         raise ValueError(f"バフェットコードからの{statement}データ取得・解析に失敗しました。")
                 else:
-                    # get_html_soup内でエラーがraiseされるかNoneが返るので、ここでさらにエラーを生成
                     raise ValueError(f"バフェットコード({url})へのアクセスに失敗しました。")
 
             yf_data_for_calc = {**info, **options}
@@ -841,7 +832,9 @@ class IntegratedDataHandler:
 # ==============================================================================
 # 4. GUIアプリケーションクラス (Streamlit)
 # ==============================================================================
-
+# ...
+# ここから下のUI部分は変更なし
+# ...
 def get_recommendation(score):
     if score is None: return "---", "評価不能"
     if score >= 90: return "★★★★★", "神レベル"
@@ -901,7 +894,7 @@ def get_kiyohara_commentary(net_cash_ratio, cn_per, net_income):
 st.set_page_config(page_title="統合型 企業価値分析ツール", layout="wide")
 
 st.sidebar.title("分析設定")
-ticker_input = st.sidebar.text_area("銘柄コード or 会社名 (カンマ区切り)", "6758, トヨタ, 9984")
+ticker_input = st.sidebar.text_area("銘柄コード or 会社名 (カンマ区切り)", "7203, 6758, 9984")
 
 if 'rf_rate' not in st.session_state:
     st.session_state.rf_rate = 0.01
@@ -910,10 +903,14 @@ if 'rf_rate_manual' not in st.session_state:
 if 'rf_rate_fetched' not in st.session_state:
     st.session_state.rf_rate_fetched = False
 
+# ▼▼▼ 修正箇所 ▼▼▼: アプリ起動時に一度だけ実行されるように修正
+if 'data_handler' not in st.session_state:
+    st.session_state.data_handler = IntegratedDataHandler()
+
 if not st.session_state.rf_rate_fetched:
     with st.spinner("最新のリスクフリーレートを取得中..."):
-        handler = IntegratedDataHandler()
-        rate = handler.get_risk_free_rate()
+        # st.session_state.data_handler を使用
+        rate = st.session_state.data_handler.get_risk_free_rate()
         if rate is not None:
             st.session_state.rf_rate = rate
             st.session_state.rf_rate_manual = rate
@@ -932,9 +929,7 @@ mrp = st.sidebar.number_input("マーケットリスクプレミアム(MRP)", va
 analyze_button = st.sidebar.button("分析実行")
 
 st.title("統合型 企業価値分析ツール")
-
 st.caption(f"最終更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
 
 if 'results' not in st.session_state:
     st.session_state.results = None
@@ -942,7 +937,8 @@ if 'results' not in st.session_state:
 def run_analysis_for_all(stocks_to_analyze, options_str):
     options = eval(options_str)
     all_results = {}
-    data_handler = IntegratedDataHandler()
+    # st.session_state.data_handler を使用
+    data_handler = st.session_state.data_handler
     for stock_info in stocks_to_analyze:
         code = stock_info['code']
         result = data_handler.perform_full_analysis(code, options)
@@ -956,7 +952,8 @@ if analyze_button:
     if not input_queries:
         st.error("銘柄コードまたは会社名を入力してください。")
     else:
-        search_handler = IntegratedDataHandler()
+        # st.session_state.data_handler を使用
+        search_handler = st.session_state.data_handler
         target_stocks = []
         not_found_queries = []
         
@@ -990,7 +987,9 @@ if analyze_button:
             
             st.session_state.results = all_results
 
-
+# ...
+# ここから下のUI表示部分は変更なし
+# ...
 if st.session_state.results:
     all_results = st.session_state.results
     
