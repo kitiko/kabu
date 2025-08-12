@@ -12,7 +12,10 @@ from collections import OrderedDict
 import numpy as np
 import matplotlib.pyplot as plt
 import japanize_matplotlib
-import pyperclip
+# ▼▼▼ 修正箇所 ▼▼▼: pyperclipを削除
+# import pyperclip 
+# ▼▼▼ 修正箇所 ▼▼▼: st_copy_buttonをインポート
+from st_copy_button import st_copy_button
 import unicodedata
 import random
 
@@ -42,10 +45,8 @@ def load_jpx_stock_list():
         
         df.dropna(subset=['code', 'name'], inplace=True)
         
-        # ▼▼▼ 修正箇所 ▼▼▼: 336Aのような英字を含むコードに対応
-        # コードを文字列に変換し、数字コードは整数に、文字コードはそのまま大文字に変換
+        # 336Aのような英字を含むコードに対応
         df['code'] = df['code'].apply(lambda x: str(int(x)) if isinstance(x, (int, float)) else str(x).strip().upper())
-        # 4桁の数字、または3桁の数字+英字1文字のパターンに合致するもののみを抽出
         df = df[df['code'].str.fullmatch(r'(\d{4}|\d{3}[A-Z])', na=False)]
         
         df['normalized_name'] = df['name'].apply(normalize_text)
@@ -61,20 +62,17 @@ def load_jpx_stock_list():
             st.error(f"銘柄リストの読み込み中に予期せぬエラーが発生しました: {e}")
         return pd.DataFrame(columns=['code', 'name', 'market', 'sector', 'normalized_name'])
 
-# ▼▼▼ 修正箇所 ▼▼▼: 日本語社名での検索精度向上のため、不要語句を追加
 def normalize_text(text: str) -> str:
     """検索クエリと銘柄名を比較のために正規化する"""
     if not isinstance(text, str):
         return ""
     text = unicodedata.normalize('NFKC', text)
-    # ひらがなをカタカナに変換
     text = "".join([chr(ord(c) + 96) if "ぁ" <= c <= "ん" else c for c in text])
     text = text.upper()
-    # 株式会社、(株)などの法人格やスペース、中黒点を削除
     remove_words = [
         'ホールディングス', 'グループ', '株式会社', '合同会社', '有限会社', 
         '(株)', '(同)', '(有)', 
-        ' ', '　', '・', '-' # 半角/全角スペース、中黒点、ハイフンを削除対象に追加
+        ' ', '　', '・', '-'
     ]
     for word in remove_words:
         text = text.replace(word, '')
@@ -115,13 +113,11 @@ class IntegratedDataHandler:
         except Exception as e:
             logger.warning(f"セッションの初期化に失敗しました: {e}")
 
-    # ▼▼▼ 修正箇所 ▼▼▼: 336Aのような英字を含むコードでの検索に対応
     def get_ticker_info_from_query(self, query: str) -> dict | None:
         """銘柄コードや会社名から銘柄情報を取得する。検索精度を向上。"""
         query_original = query.strip()
-        query_upper = query_original.upper() # コード検索用に大文字化
+        query_upper = query_original.upper()
 
-        # 4桁の数字、または3桁の数字+英字1文字のパターンに合致するかチェック
         if re.fullmatch(r'(\d{4}|\d{3}[A-Z])', query_upper):
             code_to_search = query_upper
             if not self.stock_list_df.empty:
@@ -136,7 +132,6 @@ class IntegratedDataHandler:
         if self.stock_list_df.empty:
             return None
 
-        # 会社名での検索ロジック (元のクエリで正規化)
         normalized_query = normalize_text(query_original)
         if not normalized_query:
             return None
@@ -188,7 +183,6 @@ class IntegratedDataHandler:
         logger.info(f"セッションを使ってURLにアクセス: {url}")
         
         try:
-            # ▼▼▼ 修正箇所 ▼▼▼: 待機時間を3〜5秒に変更
             wait_time = random.uniform(3.0, 5.0)
             logger.info(f"{wait_time:.2f}秒待機します...")
             time.sleep(wait_time)
@@ -212,16 +206,13 @@ class IntegratedDataHandler:
                 logger.error(f"セッションの再初期化にも失敗しました: {se}")
             return None
 
-    # ▼▼▼ 修正箇所 ▼▼▼: curl-cffi を使ってリスクフリーレートを取得
     def get_risk_free_rate(self) -> float | None:
         """curl-cffiセッションを使用してリスクフリーレートを取得する"""
         url = "https://jp.investing.com/rates-bonds/japan-10-year-bond-yield"
         logger.info(f"リスクフリーレート取得試行 (curl_cffi使用): {url}")
         try:
-            # 保持しているセッション (curl_cffi) を使ってリクエストを送信
             response = self.session.get(url, timeout=25)
             response.raise_for_status()
-            # get_html_soupと同様にresponse.contentを渡す
             soup = BeautifulSoup(response.content, 'html.parser')
             yield_element = soup.find('div', attrs={'data-test': 'instrument-price-last'})
             if yield_element:
@@ -747,7 +738,6 @@ class IntegratedDataHandler:
             info = None
             for attempt in range(3):
                 try:
-                    # yfinanceは 336A のようなコードの場合、`336A.T` を受け付ける
                     ticker_obj = yf.Ticker(f"{ticker_code}.T")
                     info = ticker_obj.info
                     if info and info.get('quoteType') is not None:
@@ -1066,9 +1056,8 @@ if st.session_state.results:
                 f"キャッシュニュートラルPER: {format_for_copy(cnper_data)}\n"
                 f"ROIC: {format_for_copy(roic_data)}"
             )
-            if st.button("📋 結果をコピー", key=f"copy_{display_key}"):
-                pyperclip.copy(copy_text)
-                st.toast("コピーしました！")
+            # ▼▼▼ 修正箇所 ▼▼▼: st.button と pyperclip.copy を st_copy_button に置き換え
+            st_copy_button(copy_text, "📋 結果をコピー", key=f"copy_{display_key}")
         
         st.markdown(f"#### 総合スコア ({strategy_name}): <span style='font-size: 28px; font-weight: bold; color: {score_color};'>{score_text}点</span> <span style='font-size: 32px;'>{stars_text}</span>", unsafe_allow_html=True)
         
