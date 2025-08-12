@@ -1,8 +1,9 @@
+
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 from curl_cffi import requests as curl_requests
-import requests
+# import requests  <- この行を削除しました (未使用のため)
 from bs4 import BeautifulSoup
 import logging
 import time
@@ -12,10 +13,9 @@ from collections import OrderedDict
 import numpy as np
 import matplotlib.pyplot as plt
 import japanize_matplotlib
-# pyperclipを削除
+import pyperclip
 import unicodedata
 import random
-from st_copy_button import copy_button # st_copy_buttonをインポート
 
 # ==============================================================================
 # 1. ログ設定
@@ -1067,8 +1067,9 @@ if st.session_state.results:
                 f"キャッシュニュートラルPER: {format_for_copy(cnper_data)}\n"
                 f"ROIC: {format_for_copy(roic_data)}"
             )
-            # ▼▼▼ 修正箇所 ▼▼▼: st.button と pyperclip を copy_button に置き換え
-            copy_button(copy_text, "📋 結果をコピー", key=f"copy_{display_key}")
+            if st.button("📋 結果をコピー", key=f"copy_{display_key}"):
+                pyperclip.copy(copy_text)
+                st.toast("コピーしました！")
         
         st.markdown(f"#### 総合スコア ({strategy_name}): <span style='font-size: 28px; font-weight: bold; color: {score_color};'>{score_text}点</span> <span style='font-size: 32px;'>{stars_text}</span>", unsafe_allow_html=True)
         
@@ -1285,7 +1286,7 @@ if st.session_state.results:
                     else:
                         st.warning("Yahoo Financeから財務データを取得できませんでした。")
 
-        st.markdown("---") 
+    st.markdown("---") 
 
     st.header("時系列グラフ比較")
     metrics_to_plot = ['EPS (円)', 'EPS成長率 (対前年比) (%)', 'PER (倍)', 'PBR (倍)', 'ROE (%)', '自己資本比率 (%)', '年間1株配当 (円)', 'PEG (実績)']
