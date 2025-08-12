@@ -16,8 +16,6 @@ import pyperclip
 import unicodedata
 import random
 
-# （ログ設定など、前半部分は変更なしのため省略）
-# ...
 # ==============================================================================
 # 1. ログ設定
 # ==============================================================================
@@ -43,8 +41,13 @@ def load_jpx_stock_list():
         df.columns = ['code', 'name', 'market', 'sector']
         
         df.dropna(subset=['code', 'name'], inplace=True)
-        df = df[df['code'].apply(lambda x: isinstance(x, (int, float)) and 1000 <= x <= 9999)]
-        df['code'] = df['code'].astype(int).astype(str)
+        
+        # ▼▼▼ 修正箇所 ▼▼▼: 336Aのような英字を含むコードに対応
+        # コードを文字列に変換し、数字コードは整数に、文字コードはそのまま大文字に変換
+        df['code'] = df['code'].apply(lambda x: str(int(x)) if isinstance(x, (int, float)) else str(x).strip().upper())
+        # 4桁の数字、または3桁の数字+英字1文字のパターンに合致するもののみを抽出
+        df = df[df['code'].str.fullmatch(r'(\d{4}|\d{3}[A-Z])', na=False)]
+        
         df['normalized_name'] = df['name'].apply(normalize_text)
         logger.info(f"銘柄リストをロードしました: {len(df)}件")
         return df
@@ -58,14 +61,21 @@ def load_jpx_stock_list():
             st.error(f"銘柄リストの読み込み中に予期せぬエラーが発生しました: {e}")
         return pd.DataFrame(columns=['code', 'name', 'market', 'sector', 'normalized_name'])
 
+# ▼▼▼ 修正箇所 ▼▼▼: 日本語社名での検索精度向上のため、不要語句を追加
 def normalize_text(text: str) -> str:
     """検索クエリと銘柄名を比較のために正規化する"""
     if not isinstance(text, str):
         return ""
     text = unicodedata.normalize('NFKC', text)
+    # ひらがなをカタカナに変換
     text = "".join([chr(ord(c) + 96) if "ぁ" <= c <= "ん" else c for c in text])
     text = text.upper()
-    remove_words = ['ホールディングス', 'グループ', '株式会社', '合同会社', '有限会社', '(株)', '(同)', '(有)']
+    # 株式会社、(株)などの法人格やスペース、中黒点を削除
+    remove_words = [
+        'ホールディングス', 'グループ', '株式会社', '合同会社', '有限会社', 
+        '(株)', '(同)', '(有)', 
+        ' ', '　', '・', '-' # 半角/全角スペース、中黒点、ハイフンを削除対象に追加
+    ]
     for word in remove_words:
         text = text.replace(word, '')
     return text.strip()
@@ -73,7 +83,6 @@ def normalize_text(text: str) -> str:
 # ==============================================================================
 # 戦略の定義
 # ==============================================================================
-
 STRATEGY_WEIGHTS = {
     "⚖️ バランス型（バランス）": {
         "safety": 0.25, "value": 0.25, "quality": 0.25, "growth": 0.25
@@ -89,7 +98,6 @@ STRATEGY_WEIGHTS = {
     }
 }
 
-
 # ==============================================================================
 # データ処理クラス
 # ==============================================================================
@@ -99,55 +107,53 @@ class IntegratedDataHandler:
     def __init__(self):
         """初期化時に銘柄リストを読み込む"""
         self.stock_list_df = load_jpx_stock_list()
-        # ▼▼▼ 修正箇所 ▼▼▼: セッションオブジェクトをクラスインスタンスで保持
         self.session = curl_requests.Session()
-        self.session.impersonate = "chrome120" # ブラウザ偽装設定
-        # セッションの初期化
+        self.session.impersonate = "chrome120"
         try:
             logger.info("バフェットコードへのセッションを初期化します。")
             self.session.get("https://www.buffett-code.com/", timeout=20)
         except Exception as e:
             logger.warning(f"セッションの初期化に失敗しました: {e}")
 
-
-    # ▼▼▼ 修正箇所 ▼▼▼: 検索ロジックを改善
+    # ▼▼▼ 修正箇所 ▼▼▼: 336Aのような英字を含むコードでの検索に対応
     def get_ticker_info_from_query(self, query: str) -> dict | None:
         """銘柄コードや会社名から銘柄情報を取得する。検索精度を向上。"""
-        query = query.strip()
+        query_original = query.strip()
+        query_upper = query_original.upper() # コード検索用に大文字化
 
-        if re.fullmatch(r'\d{4}', query):
+        # 4桁の数字、または3桁の数字+英字1文字のパターンに合致するかチェック
+        if re.fullmatch(r'(\d{4}|\d{3}[A-Z])', query_upper):
+            code_to_search = query_upper
             if not self.stock_list_df.empty:
-                stock_data = self.stock_list_df[self.stock_list_df['code'] == query]
+                stock_data = self.stock_list_df[self.stock_list_df['code'] == code_to_search]
                 if not stock_data.empty:
                     return stock_data.iloc[0].to_dict()
                 else:
-                    logger.warning(f"銘柄コード '{query}' はリストに存在しませんが、分析を試みます。")
-                    return {'code': query, 'name': f'銘柄 {query}', 'sector': '業種不明'}
-            return {'code': query, 'name': f'銘柄 {query}', 'sector': '業種不明'}
+                    logger.warning(f"銘柄コード '{code_to_search}' はリストに存在しませんが、分析を試みます。")
+                    return {'code': code_to_search, 'name': f'銘柄 {code_to_search}', 'sector': '業種不明'}
+            return {'code': code_to_search, 'name': f'銘柄 {code_to_search}', 'sector': '業種不明'}
 
         if self.stock_list_df.empty:
             return None
 
-        normalized_query = normalize_text(query)
+        # 会社名での検索ロジック (元のクエリで正規化)
+        normalized_query = normalize_text(query_original)
         if not normalized_query:
             return None
 
-        # 1. 部分一致で候補を絞る
         matches = self.stock_list_df[self.stock_list_df['normalized_name'].str.contains(normalized_query, na=False)].copy()
         
         if not matches.empty:
-            # 2. プライム市場の銘柄を優先
             prime_matches = matches[matches['market'].str.contains('プライム', na=False)]
             target_df = prime_matches if not prime_matches.empty else matches
 
-            # 3. 検索クエリと名前の文字数の差が最も小さいものを選択
             target_df.loc[:, 'diff'] = target_df['normalized_name'].apply(lambda x: abs(len(x) - len(normalized_query)))
             stock_data = target_df.sort_values(by='diff').iloc[0]
 
-            logger.info(f"検索クエリ '{query}' から銘柄 '{stock_data['name']} ({stock_data['code']})' を見つけました。")
+            logger.info(f"検索クエリ '{query_original}' から銘柄 '{stock_data['name']} ({stock_data['code']})' を見つけました。")
             return stock_data.to_dict()
 
-        logger.warning(f"検索クエリ '{query}' に一致する銘柄が見つかりませんでした。")
+        logger.warning(f"検索クエリ '{query_original}' に一致する銘柄が見つかりませんでした。")
         return None
 
     YFINANCE_TRANSLATION_MAP = {
@@ -175,7 +181,6 @@ class IntegratedDataHandler:
         'Net Change In Cash': '現金の増減額', 'Free Cash Flow': 'フリーキャッシュフロー',
     }
 
-    # ▼▼▼ 修正箇所 ▼▼▼: セッションを使ったcurl_cffiアクセス
     def get_html_soup(self, url: str) -> BeautifulSoup | None:
         """
         保持しているセッションを使い、指定されたURLからHTMLを取得する。
@@ -183,11 +188,11 @@ class IntegratedDataHandler:
         logger.info(f"セッションを使ってURLにアクセス: {url}")
         
         try:
-            wait_time = random.uniform(1.5, 3.0)
+            # ▼▼▼ 修正箇所 ▼▼▼: 待機時間を3〜5秒に変更
+            wait_time = random.uniform(3.0, 5.0)
             logger.info(f"{wait_time:.2f}秒待機します...")
             time.sleep(wait_time)
             
-            # 初期化済みのセッションを使ってリクエストを送信
             response = self.session.get(url, timeout=25)
             response.raise_for_status()
             
@@ -197,7 +202,6 @@ class IntegratedDataHandler:
         except Exception as e:
             logger.error(f"curl_cffiセッションでのアクセス中にエラーが発生しました: {url}, エラー: {e}", exc_info=True)
             st.error(f"バフェットコードへのアクセスに失敗しました。サイトがメンテナンス中か、セキュリティがさらに強化された可能性があります。(エラー: {e})")
-            # セッションが切れた可能性を考慮して再初期化を試みる
             try:
                 logger.warning("セッションの再初期化を試みます...")
                 self.session = curl_requests.Session()
@@ -208,17 +212,17 @@ class IntegratedDataHandler:
                 logger.error(f"セッションの再初期化にも失敗しました: {se}")
             return None
 
+    # ▼▼▼ 修正箇所 ▼▼▼: curl-cffi を使ってリスクフリーレートを取得
     def get_risk_free_rate(self) -> float | None:
-        # この関数は変更なし
+        """curl-cffiセッションを使用してリスクフリーレートを取得する"""
         url = "https://jp.investing.com/rates-bonds/japan-10-year-bond-yield"
-        logger.info(f"リスクフリーレート取得試行: {url}")
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        logger.info(f"リスクフリーレート取得試行 (curl_cffi使用): {url}")
         try:
-            response = requests.get(url, headers=headers, timeout=10)
+            # 保持しているセッション (curl_cffi) を使ってリクエストを送信
+            response = self.session.get(url, timeout=25)
             response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # get_html_soupと同様にresponse.contentを渡す
+            soup = BeautifulSoup(response.content, 'html.parser')
             yield_element = soup.find('div', attrs={'data-test': 'instrument-price-last'})
             if yield_element:
                 rate = float(yield_element.text.strip()) / 100
@@ -229,13 +233,10 @@ class IntegratedDataHandler:
                 st.toast("⚠️ 金利データが見つかりませんでした。", icon="⚠️")
                 return None
         except Exception as e:
-            logger.error(f"リスクフリーレートの取得に失敗しました: {e}")
+            logger.error(f"リスクフリーレートの取得に失敗しました: {e}", exc_info=True)
             st.toast("⚠️ リスクフリーレートの取得に失敗しました。", icon="⚠️")
             return None
-    
-    # ... これ以降の `IntegratedDataHandler` クラス内のメソッドは変更なし ...
-    # ... `perform_full_analysis` や各種計算ロジックはそのまま ...
-    # ... アプリケーションのUI部分（Streamlitのコード）も変更なし ...
+            
     def parse_financial_value(self, s: str) -> int | float | None:
         s = str(s).replace(',', '').strip()
         if s in ['-', '---', '']:
@@ -746,6 +747,7 @@ class IntegratedDataHandler:
             info = None
             for attempt in range(3):
                 try:
+                    # yfinanceは 336A のようなコードの場合、`336A.T` を受け付ける
                     ticker_obj = yf.Ticker(f"{ticker_code}.T")
                     info = ticker_obj.info
                     if info and info.get('quoteType') is not None:
@@ -832,9 +834,6 @@ class IntegratedDataHandler:
 # ==============================================================================
 # 4. GUIアプリケーションクラス (Streamlit)
 # ==============================================================================
-# ...
-# ここから下のUI部分は変更なし
-# ...
 def get_recommendation(score):
     if score is None: return "---", "評価不能"
     if score >= 90: return "★★★★★", "神レベル"
@@ -894,7 +893,7 @@ def get_kiyohara_commentary(net_cash_ratio, cn_per, net_income):
 st.set_page_config(page_title="統合型 企業価値分析ツール", layout="wide")
 
 st.sidebar.title("分析設定")
-ticker_input = st.sidebar.text_area("銘柄コード or 会社名 (カンマ区切り)", "7203, 6758, 9984")
+ticker_input = st.sidebar.text_area("銘柄コード or 会社名 (カンマ区切り)", "7203, 336A, ダイナミックマッププラットフォーム")
 
 if 'rf_rate' not in st.session_state:
     st.session_state.rf_rate = 0.01
@@ -903,13 +902,11 @@ if 'rf_rate_manual' not in st.session_state:
 if 'rf_rate_fetched' not in st.session_state:
     st.session_state.rf_rate_fetched = False
 
-# ▼▼▼ 修正箇所 ▼▼▼: アプリ起動時に一度だけ実行されるように修正
 if 'data_handler' not in st.session_state:
     st.session_state.data_handler = IntegratedDataHandler()
 
 if not st.session_state.rf_rate_fetched:
     with st.spinner("最新のリスクフリーレートを取得中..."):
-        # st.session_state.data_handler を使用
         rate = st.session_state.data_handler.get_risk_free_rate()
         if rate is not None:
             st.session_state.rf_rate = rate
@@ -937,7 +934,6 @@ if 'results' not in st.session_state:
 def run_analysis_for_all(stocks_to_analyze, options_str):
     options = eval(options_str)
     all_results = {}
-    # st.session_state.data_handler を使用
     data_handler = st.session_state.data_handler
     for stock_info in stocks_to_analyze:
         code = stock_info['code']
@@ -952,7 +948,6 @@ if analyze_button:
     if not input_queries:
         st.error("銘柄コードまたは会社名を入力してください。")
     else:
-        # st.session_state.data_handler を使用
         search_handler = st.session_state.data_handler
         target_stocks = []
         not_found_queries = []
@@ -987,9 +982,6 @@ if analyze_button:
             
             st.session_state.results = all_results
 
-# ...
-# ここから下のUI表示部分は変更なし
-# ...
 if st.session_state.results:
     all_results = st.session_state.results
     
