@@ -16,8 +16,6 @@ import pyperclip
 import unicodedata
 import random
 
-# （ログ設定など、前半部分は変更なしのため省略）
-# ...
 # ==============================================================================
 # 1. ログ設定
 # ==============================================================================
@@ -43,8 +41,10 @@ def load_jpx_stock_list():
         df.columns = ['code', 'name', 'market', 'sector']
         
         df.dropna(subset=['code', 'name'], inplace=True)
-        df = df[df['code'].apply(lambda x: isinstance(x, (int, float)) and 1000 <= x <= 9999)]
-        df['code'] = df['code'].astype(int).astype(str)
+        
+        df['code'] = df['code'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True).str.upper()
+        df = df[df['code'].str.fullmatch(r'(\d{4}|\d{3}[A-Z])', na=False)]
+
         df['normalized_name'] = df['name'].apply(normalize_text)
         logger.info(f"銘柄リストをロードしました: {len(df)}件")
         return df
@@ -58,96 +58,91 @@ def load_jpx_stock_list():
             st.error(f"銘柄リストの読み込み中に予期せぬエラーが発生しました: {e}")
         return pd.DataFrame(columns=['code', 'name', 'market', 'sector', 'normalized_name'])
 
+# ▼▼▼【修正】検索の堅牢性を高めるため、全角・半角スペースを削除する処理を追加 ▼▼▼
 def normalize_text(text: str) -> str:
     """検索クエリと銘柄名を比較のために正規化する"""
     if not isinstance(text, str):
         return ""
     text = unicodedata.normalize('NFKC', text)
+    # ひらがなをカタカナに変換
     text = "".join([chr(ord(c) + 96) if "ぁ" <= c <= "ん" else c for c in text])
     text = text.upper()
     remove_words = ['ホールディングス', 'グループ', '株式会社', '合同会社', '有限会社', '(株)', '(同)', '(有)']
     for word in remove_words:
         text = text.replace(word, '')
+    
+    # 全角・半角スペースをすべて削除
+    text = text.replace(' ', '').replace('　', '')
+    
     return text.strip()
 
 # ==============================================================================
 # 戦略の定義
 # ==============================================================================
-
 STRATEGY_WEIGHTS = {
-    "⚖️ バランス型（バランス）": {
-        "safety": 0.25, "value": 0.25, "quality": 0.25, "growth": 0.25
-    },
-    "💎 バリュー重視（価値重視）": {
-        "safety": 0.35, "value": 0.40, "quality": 0.20, "growth": 0.05
-    },
-    "🚀 グロース重視（成長重視）": {
-        "safety": 0.10, "value": 0.20, "quality": 0.35, "growth": 0.35
-    },
-    "🛡️ 健全性重視（安全第一）": {
-        "safety": 0.50, "value": 0.25, "quality": 0.15, "growth": 0.10
-    }
+    "⚖️ バランス型（バランス）": {"safety": 0.25, "value": 0.25, "quality": 0.25, "growth": 0.25},
+    "💎 バリュー重視（価値重視）": {"safety": 0.35, "value": 0.40, "quality": 0.20, "growth": 0.05},
+    "🚀 グロース重視（成長重視）": {"safety": 0.10, "value": 0.20, "quality": 0.35, "growth": 0.35},
+    "🛡️ 健全性重視（安全第一）": {"safety": 0.50, "value": 0.25, "quality": 0.15, "growth": 0.10}
 }
-
 
 # ==============================================================================
 # データ処理クラス
 # ==============================================================================
 class IntegratedDataHandler:
-    """両プログラムのデータ取得・分析ロジックを統合"""
-    
     def __init__(self):
-        """初期化時に銘柄リストを読み込む"""
         self.stock_list_df = load_jpx_stock_list()
-        # ▼▼▼ 修正箇所 ▼▼▼: セッションオブジェクトをクラスインスタンスで保持
         self.session = curl_requests.Session()
-        self.session.impersonate = "chrome120" # ブラウザ偽装設定
-        # セッションの初期化
+        self.session.impersonate = "chrome120"
         try:
             logger.info("バフェットコードへのセッションを初期化します。")
             self.session.get("https://www.buffett-code.com/", timeout=20)
         except Exception as e:
             logger.warning(f"セッションの初期化に失敗しました: {e}")
 
-
-    # ▼▼▼ 修正箇所 ▼▼▼: 検索ロジックを改善
     def get_ticker_info_from_query(self, query: str) -> dict | None:
         """銘柄コードや会社名から銘柄情報を取得する。検索精度を向上。"""
-        query = query.strip()
+        logger.info(f"--- 検索開始 --- クエリ: '{query}'")
+        
+        processed_query = unicodedata.normalize('NFKC', str(query)).strip().upper()
+        logger.info(f"正規化後クエリ: '{processed_query}'")
 
-        if re.fullmatch(r'\d{4}', query):
+        if re.fullmatch(r'(\d{4}|\d{3}[A-Z])', processed_query):
+            logger.info(f"'{processed_query}' は銘柄コード形式です。コードとして検索します。")
+            ticker_code = processed_query
+            
             if not self.stock_list_df.empty:
-                stock_data = self.stock_list_df[self.stock_list_df['code'] == query]
+                stock_data = self.stock_list_df[self.stock_list_df['code'] == ticker_code]
                 if not stock_data.empty:
+                    found_name = stock_data.iloc[0]['name']
+                    logger.info(f"JPXリストから銘柄 '{found_name}' ({ticker_code}) を発見しました。")
                     return stock_data.iloc[0].to_dict()
                 else:
-                    logger.warning(f"銘柄コード '{query}' はリストに存在しませんが、分析を試みます。")
-                    return {'code': query, 'name': f'銘柄 {query}', 'sector': '業種不明'}
-            return {'code': query, 'name': f'銘柄 {query}', 'sector': '業種不明'}
+                    logger.warning(f"JPXリストに銘柄コード '{ticker_code}' が見つかりませんでした。分析は試行します。(※ jpx_list.xls が古い可能性があります)")
+                    return {'code': ticker_code, 'name': f'銘柄 {ticker_code}', 'sector': '業種不明'}
+            else:
+                logger.warning("JPXリストがロードされていません。コードとして分析を試行します。")
+                return {'code': ticker_code, 'name': f'銘柄 {ticker_code}', 'sector': '業種不明'}
 
+        logger.info(f"'{processed_query}' は銘柄コード形式ではありません。会社名として検索します。")
         if self.stock_list_df.empty:
+            logger.warning("JPXリストがロードされていないため、会社名検索はできません。")
             return None
 
-        normalized_query = normalize_text(query)
-        if not normalized_query:
-            return None
-
-        # 1. 部分一致で候補を絞る
-        matches = self.stock_list_df[self.stock_list_df['normalized_name'].str.contains(normalized_query, na=False)].copy()
+        normalized_name_query = normalize_text(processed_query)
+        logger.info(f"会社名検索用の正規化クエリ: '{normalized_name_query}'")
+        
+        matches = self.stock_list_df[self.stock_list_df['normalized_name'].str.contains(normalized_name_query, na=False)].copy()
         
         if not matches.empty:
-            # 2. プライム市場の銘柄を優先
             prime_matches = matches[matches['market'].str.contains('プライム', na=False)]
             target_df = prime_matches if not prime_matches.empty else matches
-
-            # 3. 検索クエリと名前の文字数の差が最も小さいものを選択
-            target_df.loc[:, 'diff'] = target_df['normalized_name'].apply(lambda x: abs(len(x) - len(normalized_query)))
+            target_df.loc[:, 'diff'] = target_df['normalized_name'].apply(lambda x: abs(len(x) - len(normalized_name_query)))
             stock_data = target_df.sort_values(by='diff').iloc[0]
-
             logger.info(f"検索クエリ '{query}' から銘柄 '{stock_data['name']} ({stock_data['code']})' を見つけました。")
             return stock_data.to_dict()
 
-        logger.warning(f"検索クエリ '{query}' に一致する銘柄が見つかりませんでした。")
+        logger.warning(f"最終的に、検索クエリ '{query}' に一致する銘柄は見つかりませんでした。")
         return None
 
     YFINANCE_TRANSLATION_MAP = {
@@ -175,29 +170,19 @@ class IntegratedDataHandler:
         'Net Change In Cash': '現金の増減額', 'Free Cash Flow': 'フリーキャッシュフロー',
     }
 
-    # ▼▼▼ 修正箇所 ▼▼▼: セッションを使ったcurl_cffiアクセス
     def get_html_soup(self, url: str) -> BeautifulSoup | None:
-        """
-        保持しているセッションを使い、指定されたURLからHTMLを取得する。
-        """
         logger.info(f"セッションを使ってURLにアクセス: {url}")
-        
         try:
             wait_time = random.uniform(1.5, 3.0)
             logger.info(f"{wait_time:.2f}秒待機します...")
             time.sleep(wait_time)
-            
-            # 初期化済みのセッションを使ってリクエストを送信
             response = self.session.get(url, timeout=25)
             response.raise_for_status()
-            
             logger.info(f"URLへのアクセス成功 (ステータスコード: {response.status_code}): {url}")
             return BeautifulSoup(response.content, 'html.parser')
-
         except Exception as e:
             logger.error(f"curl_cffiセッションでのアクセス中にエラーが発生しました: {url}, エラー: {e}", exc_info=True)
             st.error(f"バフェットコードへのアクセスに失敗しました。サイトがメンテナンス中か、セキュリティがさらに強化された可能性があります。(エラー: {e})")
-            # セッションが切れた可能性を考慮して再初期化を試みる
             try:
                 logger.warning("セッションの再初期化を試みます...")
                 self.session = curl_requests.Session()
@@ -209,12 +194,9 @@ class IntegratedDataHandler:
             return None
 
     def get_risk_free_rate(self) -> float | None:
-        # この関数は変更なし
         url = "https://jp.investing.com/rates-bonds/japan-10-year-bond-yield"
         logger.info(f"リスクフリーレート取得試行: {url}")
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         try:
             response = requests.get(url, headers=headers, timeout=10)
             response.raise_for_status()
@@ -233,92 +215,60 @@ class IntegratedDataHandler:
             st.toast("⚠️ リスクフリーレートの取得に失敗しました。", icon="⚠️")
             return None
     
-    # ... これ以降の `IntegratedDataHandler` クラス内のメソッドは変更なし ...
-    # ... `perform_full_analysis` や各種計算ロジックはそのまま ...
-    # ... アプリケーションのUI部分（Streamlitのコード）も変更なし ...
     def parse_financial_value(self, s: str) -> int | float | None:
         s = str(s).replace(',', '').strip()
-        if s in ['-', '---', '']:
-            return None
+        if s in ['-', '---', '']: return None
         is_negative = s.startswith(('△', '-'))
         s = s.lstrip('△-')
         try:
             total = 0
-            if '兆' in s:
-                total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 1000000
-            elif '億' in s:
-                total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 100
-            elif '百万円' in s:
-                total += float(re.findall(r'(\d+\.?\d*)', s)[0])
-            elif '万円' in s:
-                total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 0.01
-            elif re.match(r'^\d+\.?\d*$', s):
-                total = float(s)
-            else:
-                return s
+            if '兆' in s: total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 1000000
+            elif '億' in s: total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 100
+            elif '百万円' in s: total += float(re.findall(r'(\d+\.?\d*)', s)[0])
+            elif '万円' in s: total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 0.01
+            elif re.match(r'^\d+\.?\d*$', s): total = float(s)
+            else: return s
             return -int(total) if is_negative else int(total)
-        except (ValueError, TypeError, IndexError):
-            return s
+        except (ValueError, TypeError, IndexError): return s
 
     def extract_all_financial_data(self, soup: BeautifulSoup) -> dict | None:
         financial_table = soup.find('table', class_='financial-table')
-        if not financial_table:
-            return None
+        if not financial_table: return None
         thead, tbody = financial_table.find('thead'), financial_table.find('tbody')
-        if not thead or not tbody:
-            return None
+        if not thead or not tbody: return None
         period_headers = thead.find('tr').find_all('th')
-        if len(period_headers) <= 1:
-            return None
+        if len(period_headers) <= 1: return None
         valid_periods = []
         for i, th in enumerate(period_headers[1:]):
             header_text = th.text.strip()
             if header_text and "E" not in header_text.upper() and "C" not in header_text.upper():
                 valid_periods.append({'name': header_text, 'index': i + 1})
-        if not valid_periods:
-            return None
+        if not valid_periods: return None
         all_periods_data = OrderedDict()
         for row in tbody.find_all('tr'):
             cells = row.find_all(['th', 'td'])
             item_name = cells[0].text.strip()
-            if not item_name or not re.search(r'[a-zA-Z\u3040-\u30FF\u4E00-\u9FFF]', item_name):
-                continue
+            if not item_name or not re.search(r'[a-zA-Z\u3040-\u30FF\u4E00-\u9FFF]', item_name): continue
             for period in valid_periods:
                 period_name = period['name']
-                if period_name not in all_periods_data:
-                    all_periods_data[period_name] = {}
+                if period_name not in all_periods_data: all_periods_data[period_name] = {}
                 if len(cells) > period['index']:
                     display_value = cells[period['index']].get_text(strip=True)
                     if display_value not in ['-', '---', '']:
-                        all_periods_data[period_name][item_name] = {
-                            'display': display_value,
-                            'raw': self.parse_financial_value(display_value)
-                        }
+                        all_periods_data[period_name][item_name] = {'display': display_value, 'raw': self.parse_financial_value(display_value)}
         return all_periods_data
 
     def get_latest_financial_data(self, financial_data_dict: dict) -> dict:
-        latest_year = -1
-        latest_month = -1
-        latest_data = {}
-        if not financial_data_dict:
-            return {}
-            
+        latest_year, latest_month, latest_data = -1, -1, {}
+        if not financial_data_dict: return {}
         for period_name, data in financial_data_dict.items():
             match = re.search(r'(\d{2,4})[./](\d{1,2})', period_name)
             if match:
                 year_str, month_str = match.groups()
-                year = int(year_str)
-                month = int(month_str)
-                
-                if year < 100:
-                    year_full = 2000 + year if year < 50 else 1900 + year
-                else:
-                    year_full = year
-
+                year, month = int(year_str), int(month_str)
+                year_full = 2000 + year if year < 100 else year
                 if year_full > latest_year or (year_full == latest_year and month > latest_month):
-                    latest_year = year_full
-                    latest_month = month
-                    latest_data = data
+                    latest_year, latest_month, latest_data = year_full, month, data
         return latest_data
 
     def get_value(self, data_dict: dict, keys: list[str], log_name: str) -> any:
@@ -331,20 +281,15 @@ class IntegratedDataHandler:
         return None
 
     def format_yfinance_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        if df.empty:
-            return df
-        
+        if df.empty: return df
         df_copy = df.copy()
         df_copy = df_copy.rename(index=self.YFINANCE_TRANSLATION_MAP)
         df_copy = df_copy.loc[df_copy.index.isin(self.YFINANCE_TRANSLATION_MAP.values())]
-
         df_copy.columns = [f"{col.year}.{col.month}" for col in df_copy.columns]
-
         exclude_rows = [name for name in df_copy.index if 'EPS' in name or '比率' in name or 'Rate' in name]
         for idx in df_copy.index:
             if idx not in exclude_rows:
                 df_copy.loc[idx] = df_copy.loc[idx].apply(lambda x: x / 1e6 if pd.notna(x) else np.nan)
-        
         return df_copy
 
     def _linear_interpolate(self, value, x1, y1, x2, y2):
@@ -364,11 +309,8 @@ class IntegratedDataHandler:
         return {'score': 0, 'evaluation': '【要警戒】'}
 
     def _score_cn_per(self, cn_per, keijo_rieki, pe, trailing_eps):
-        if pe is None and trailing_eps is not None and trailing_eps < 0:
-            return {'score': 10, 'evaluation': '【赤字企業 (EPS基準)】'}
-        is_profitable = keijo_rieki is not None and keijo_rieki > 0
-        if not is_profitable:
-            return {'score': 10, 'evaluation': '【赤字・要注意】'}
+        if pe is None and trailing_eps is not None and trailing_eps < 0: return {'score': 10, 'evaluation': '【赤字企業 (EPS基準)】'}
+        if not (keijo_rieki is not None and keijo_rieki > 0): return {'score': 10, 'evaluation': '【赤字・要注意】'}
         if cn_per is None: return {'score': 0, 'evaluation': '---'}
         if cn_per < 0: return {'score': 100, 'evaluation': '【究極の割安株】'}
         if cn_per < 2: return {'score': self._linear_interpolate(cn_per, 0, 100, 2, 95), 'evaluation': '【現金より安い会社】'}
@@ -395,21 +337,11 @@ class IntegratedDataHandler:
         if peg_ratio is None or peg_ratio < 0:
             score = 0
             evaluation = "【成長鈍化・赤字】" if peg_ratio is not None else "---"
-        elif peg_ratio <= 0.5:
-            score = 100
-            evaluation = "【超割安な成長株】"
-        elif peg_ratio <= 1.0:
-            score = self._linear_interpolate(peg_ratio, 0.5, 100, 1.0, 70)
-            evaluation = "【割安な成長株】"
-        elif peg_ratio <= 1.5:
-            score = self._linear_interpolate(peg_ratio, 1.0, 70, 1.5, 40)
-            evaluation = "【適正価格】"
-        elif peg_ratio < 2.0:
-            score = self._linear_interpolate(peg_ratio, 1.5, 40, 2.0, 0)
-            evaluation = "【やや割高】"
-        else:
-            score = 0
-            evaluation = "【割高】"
+        elif peg_ratio <= 0.5: score, evaluation = 100, "【超割安な成長株】"
+        elif peg_ratio <= 1.0: score, evaluation = self._linear_interpolate(peg_ratio, 0.5, 100, 1.0, 70), "【割安な成長株】"
+        elif peg_ratio <= 1.5: score, evaluation = self._linear_interpolate(peg_ratio, 1.0, 70, 1.5, 40), "【適正価格】"
+        elif peg_ratio < 2.0: score, evaluation = self._linear_interpolate(peg_ratio, 1.5, 40, 2.0, 0), "【やや割高】"
+        else: score, evaluation = 0, "【割高】"
         return {'score': int(score), 'evaluation': evaluation}
 
     def _calculate_scoring_indicators(self, all_fin_data: dict, yf_data: dict) -> dict:
@@ -418,23 +350,19 @@ class IntegratedDataHandler:
         latest_pl_data = self.get_latest_financial_data(all_fin_data.get('損益計算書', {}))
         market_cap, pe, rf_rate, mrp, trailing_eps = (yf_data.get(k) for k in ['marketCap', 'trailingPE', 'risk_free_rate', 'mkt_risk_premium', 'trailingEps'])
         beta = yf_data.get('beta')
-        indicators['variables']['時価総額'] = market_cap
-        indicators['variables']['PER (実績)'] = pe
-        indicators['variables']['ベータ値'] = beta
+        indicators['variables'].update({'時価総額': market_cap, 'PER (実績)': pe, 'ベータ値': beta})
         if beta is None:
             beta = 1.0
             indicators['calc_warnings'].append("注記: β値の代わりに1.0で代用")
         
-        securities_keys = ['有価証券', '投資有価証券', 'その他の金融資産']
-        securities = self.get_value(latest_bs_data, securities_keys, '有価証券')
-        
+        securities = self.get_value(latest_bs_data, ['有価証券', '投資有価証券', 'その他の金融資産'], '有価証券')
         if securities is not None and securities < 0:
-            indicators['calc_warnings'].append("注記: 有価証券がマイナスだったため0として計算")
             securities = 0
-        indicators['variables']['有価証券'] = securities
+            indicators['calc_warnings'].append("注記: 有価証券がマイナスだったため0として計算")
         if securities is None:
             securities = 0
             indicators['calc_warnings'].append("注記: 有価証券が見つからないため0として計算")
+        indicators['variables']['有価証券'] = securities
         
         op_income = self.get_value(latest_pl_data, ['営業利益'], '営業利益')
         op_income_source = '営業利益'
@@ -444,21 +372,17 @@ class IntegratedDataHandler:
         if op_income is None:
             op_income = self.get_value(latest_pl_data, ['当期純利益', '親会社株主に帰属する当期純利益'], '当期純利益(代替)')
             op_income_source = '当期純利益'
-        
-        indicators['roic_source_key'] = op_income_source
-
         if op_income_source != '営業利益' and op_income is not None:
             indicators['calc_warnings'].append(f"信頼性警告: 営業利益の代わりに「{op_income_source}」を使用")
+        indicators['roic_source_key'] = op_income_source
         indicators['variables'][f'NOPAT計算用利益 ({op_income_source})'] = op_income
+
         net_assets = self.get_value(latest_bs_data, ['純資産合計', '純資産'], '純資産')
-        minority_interest = self.get_value(latest_bs_data, ['非支配株主持分'], '非支配株主持分')
         pretax_income = self.get_value(latest_pl_data, ['税引前利益', '税金等調整前当期純利益'], '税引前利益')
         corp_tax = self.get_value(latest_pl_data, ['法人税等', '法人税、住民税及び事業税'], '法人税等')
         keijo_rieki = self.get_value(latest_pl_data, ['経常利益'], '経常利益')
         net_income = self.get_value(latest_pl_data, ['当期純利益', '親会社株主に帰属する当期純利益'], '当期純利益')
-        indicators['variables']['純資産'] = net_assets
-        indicators['variables']['経常利益'] = keijo_rieki
-        indicators['variables']['当期純利益'] = net_income
+        indicators['variables'].update({'純資産': net_assets, '経常利益': keijo_rieki, '当期純利益': net_income})
 
         def check_reqs(reqs, names):
             missing = [name for req, name in zip(reqs, names) if req is None]
@@ -468,23 +392,17 @@ class IntegratedDataHandler:
         total_liabilities = self.get_value(latest_bs_data, ['負債合計'], '負債')
         if total_liabilities is None:
             total_liabilities = self.get_value(latest_bs_data, ['負債'], '負債')
-            if total_liabilities is not None:
-                indicators['calc_warnings'].append("注記: NC比率計算で「負債合計」の代わりに「負債」で代用")
-        indicators['variables']['流動資産'] = current_assets
-        indicators['variables']['負債合計'] = total_liabilities
+            if total_liabilities is not None: indicators['calc_warnings'].append("注記: NC比率計算で「負債合計」の代わりに「負債」で代用")
+        indicators['variables'].update({'流動資産': current_assets, '負債合計': total_liabilities})
         
-        nc_ratio, nc_error = None, None
-        nc_reqs, nc_names = [market_cap, current_assets, securities, total_liabilities], ["時価総額", "流動資産", "有価証券", "負債合計"]
-        nc_error = check_reqs(nc_reqs, nc_names)
+        nc_ratio, nc_error = None, check_reqs([market_cap, current_assets, securities, total_liabilities], ["時価総額", "流動資産", "有価証券", "負債合計"])
         if not nc_error:
             if market_cap > 0:
                 nc_ratio = (current_assets + (securities * 0.7) - total_liabilities) / (market_cap / 1_000_000)
                 indicators['formulas']['ネットキャッシュ比率'] = f"({current_assets:,.0f} + {securities:,.0f}*0.7 - {total_liabilities:,.0f}) / {market_cap/1e6:,.0f}"
-            else:
-                nc_error = "時価総額がゼロです"
+            else: nc_error = "時価総額がゼロです"
         
-        cnper_reqs, cnper_names = [pe, nc_ratio], ["PER", "ネットキャッシュ比率"]
-        cn_per, cnper_error = None, check_reqs(cnper_reqs, cnper_names)
+        cn_per, cnper_error = None, check_reqs([pe, nc_ratio], ["PER", "ネットキャッシュ比率"])
         if not cnper_error:
             cn_per = pe * (1 - nc_ratio)
             indicators['formulas']['キャッシュニュートラルPER'] = f"{pe:.2f} * (1 - {nc_ratio:.2f})"
@@ -495,9 +413,7 @@ class IntegratedDataHandler:
         debt = self.get_value(latest_bs_data, ['有利子負債合計', '有利子負債'], '有利子負債')
         net_debt = self.get_value(latest_bs_data, ['純有利子負債'], '純有利子負債')
         cash = self.get_value(latest_bs_data, ['現金', '現金及び預金'], '現金同等物')
-        indicators['variables']['有利子負債'] = debt
-        indicators['variables']['純有利子負債'] = net_debt
-        indicators['variables']['現金同等物'] = cash
+        indicators['variables'].update({'有利子負債': debt, '純有利子負債': net_debt, '現金同等物': cash})
 
         interest_expense = self.get_value(latest_pl_data, ['支払利息', '金融費用'], '支払利息')
         cost_of_equity = rf_rate + beta * mrp if all(v is not None for v in [beta, rf_rate, mrp]) else None
@@ -511,9 +427,7 @@ class IntegratedDataHandler:
         cost_of_debt = interest_expense / effective_debt_for_wacc if all(v is not None for v in [interest_expense, effective_debt_for_wacc]) and effective_debt_for_wacc > 0 else 0.0
         indicators['variables']['負債コスト'] = cost_of_debt
 
-        wacc_reqs, wacc_names = [cost_of_equity, market_cap, effective_debt_for_wacc], ["株主資本コスト", "時価総額", "有利子負債(または代用値)"]
-        wacc_error = check_reqs(wacc_reqs, wacc_names)
-        wacc = None
+        wacc, wacc_error = None, check_reqs([cost_of_equity, market_cap, effective_debt_for_wacc], ["株主資本コスト", "時価総額", "有利子負債(または代用値)"])
         if not wacc_error:
             e, d_yen = market_cap, effective_debt_for_wacc * 1_000_000
             v = e + d_yen
@@ -521,15 +435,12 @@ class IntegratedDataHandler:
                 wacc = cost_of_equity * (e / v) + cost_of_debt * (1 - tax_rate) * (d_yen / v)
                 indicators['formulas']['WACC'] = f"Ke {cost_of_equity:.2%} * (E/V {(e/v):.2%}) + Kd {cost_of_debt:.2%} * (1-T {tax_rate:.2%}) * (D/V {(d_yen/v):.2%})"
         
-        roic, roic_error = None, None
         invested_capital_debt = debt
         if debt is None and net_debt is not None and cash is not None:
             invested_capital_debt = net_debt + cash
             indicators['calc_warnings'].append("注記: ROIC計算で純有利子負債を代用")
         
-        roic_reqs, roic_names = [op_income, net_assets, invested_capital_debt], [op_income_source, "純資産", "有利子負債(または代用値)"]
-        roic_error = check_reqs(roic_reqs, roic_names)
-
+        roic, roic_error = None, check_reqs([op_income, net_assets, invested_capital_debt], [op_income_source, "純資産", "有利子負債(または代用値)"])
         if not roic_error:
             invested_capital = net_assets + invested_capital_debt
             nopat = op_income * (1 - tax_rate)
@@ -537,19 +448,14 @@ class IntegratedDataHandler:
                 roic = nopat / invested_capital
                 indicators['formulas']['ROIC'] = f"{nopat:,.0f} / {invested_capital:,.0f}"
         
-        nc_score_dict = self._score_net_cash_ratio(nc_ratio)
-        cn_per_score_dict = self._score_cn_per(cn_per, keijo_rieki, pe, trailing_eps)
-        roic_score_dict = self._score_roic(roic, wacc)
-        
-        indicators['net_cash_ratio'] = {'value': nc_ratio, 'reason': nc_error, **nc_score_dict}
-        indicators['cn_per'] = {'value': cn_per, 'reason': cnper_error, **cn_per_score_dict}
-        indicators['roic'] = {'value': roic, 'reason': roic_error, **roic_score_dict}
+        indicators['net_cash_ratio'] = {'value': nc_ratio, 'reason': nc_error, **self._score_net_cash_ratio(nc_ratio)}
+        indicators['cn_per'] = {'value': cn_per, 'reason': cnper_error, **self._score_cn_per(cn_per, keijo_rieki, pe, trailing_eps)}
+        indicators['roic'] = {'value': roic, 'reason': roic_error, **self._score_roic(roic, wacc)}
         indicators['wacc'] = {'value': wacc, 'reason': wacc_error}
-        
         return indicators
 
     def get_yfinance_statements(self, ticker_obj):
-        statements = {
+        return {
             "年次損益計算書": self.format_yfinance_df(ticker_obj.financials),
             "四半期損益計算書": self.format_yfinance_df(ticker_obj.quarterly_financials),
             "年次貸借対照表": self.format_yfinance_df(ticker_obj.balance_sheet),
@@ -557,7 +463,6 @@ class IntegratedDataHandler:
             "年次CF計算書": self.format_yfinance_df(ticker_obj.cashflow),
             "四半期CF計算書": self.format_yfinance_df(ticker_obj.quarterly_cashflow),
         }
-        return statements
 
     def get_timeseries_financial_metrics(self, ticker_obj, info) -> pd.DataFrame:
         financials = ticker_obj.financials
@@ -587,9 +492,7 @@ class IntegratedDataHandler:
                 if key in df.index: return df.loc[key, col]
             return None
 
-        metrics = []
-        annual_columns = financials.columns[:min(4, financials.shape[1])]
-        
+        metrics, annual_columns = [], financials.columns[:min(4, financials.shape[1])]
         logger.info(f"{info.get('shortName', '')}: {len(annual_columns)}期分の年次データを処理します。")
         for date_col in annual_columns:
             stockholder_equity = find_yf_value(balance_sheet, equity_keys, date_col)
@@ -597,7 +500,7 @@ class IntegratedDataHandler:
             net_income = find_yf_value(financials, net_income_keys, date_col)
             shares_outstanding = find_yf_value(balance_sheet, shares_keys, date_col)
             total_revenue = find_yf_value(financials, revenue_keys, date_col)
-            price = hist.asof(date_col)['Close'] if not hist.empty else None
+            price = hist.asof(date_col)['Close'] if not hist.empty and not hist.asof(date_col).empty else None
             eps = find_yf_value(financials, eps_keys, date_col)
             
             equity_ratio = (stockholder_equity / total_assets) * 100 if pd.notna(stockholder_equity) and pd.notna(total_assets) and total_assets > 0 else None
@@ -609,15 +512,12 @@ class IntegratedDataHandler:
             roe = (net_income / stockholder_equity) * 100 if pd.notna(net_income) and pd.notna(stockholder_equity) and stockholder_equity != 0 else None
             sps = total_revenue / shares_outstanding if pd.notna(total_revenue) and pd.notna(shares_outstanding) and shares_outstanding != 0 else None
             psr = price / sps if pd.notna(price) and pd.notna(sps) and sps != 0 else None
-            per = price / eps if pd.notna(price) and pd.notna(eps) and eps != 0 else None
+            per = price / eps if pd.notna(price) and pd.notna(eps) and eps > 0 else None
             bps = stockholder_equity / shares_outstanding if pd.notna(stockholder_equity) and pd.notna(shares_outstanding) and shares_outstanding != 0 else None
             pbr = price / bps if pd.notna(price) and pd.notna(bps) and bps != 0 else None
             div_yield = (annual_dividends / price) * 100 if pd.notna(price) and price > 0 else None
             
-            metrics.append({
-                '決算日': date_col.strftime('%Y-%m-%d'), '年度': f"{date_col.year}年度", 'EPS (円)': eps, 'PER (倍)': per, 'PBR (倍)': pbr, 
-                'PSR (倍)': psr, 'ROE (%)': roe, '自己資本比率 (%)': equity_ratio, '年間1株配当 (円)': annual_dividends, '配当利回り (%)': div_yield
-            })
+            metrics.append({'決算日': date_col.strftime('%Y-%m-%d'), '年度': f"{date_col.year}年度", 'EPS (円)': eps, 'PER (倍)': per, 'PBR (倍)': pbr, 'PSR (倍)': psr, 'ROE (%)': roe, '自己資本比率 (%)': equity_ratio, '年間1株配当 (円)': annual_dividends, '配当利回り (%)': div_yield})
 
         latest_equity_ratio = None
         if not balance_sheet.empty and not balance_sheet.columns.empty:
@@ -628,44 +528,29 @@ class IntegratedDataHandler:
                 latest_equity_ratio = (latest_equity / latest_assets) * 100
         
         roe_info = info.get('returnOnEquity')
-        
-        latest_metrics = {
-            '決算日': date.today().strftime('%Y-%m-%d'), '年度': '最新', 'EPS (円)': info.get('trailingEps'), 'PER (倍)': info.get('trailingPE'),
-            'PBR (倍)': info.get('priceToBook'), 'PSR (倍)': info.get('priceToSalesTrailing12Months'), 'ROE (%)': roe_info * 100 if roe_info else None,
-            '自己資本比率 (%)': latest_equity_ratio, '年間1株配当 (円)': info.get('trailingAnnualDividendRate'), '配当利回り (%)': info.get('trailingAnnualDividendYield') * 100 if info.get('trailingAnnualDividendYield') else None
-        }
+        latest_metrics = {'決算日': date.today().strftime('%Y-%m-%d'), '年度': '最新', 'EPS (円)': info.get('trailingEps'), 'PER (倍)': info.get('trailingPE'), 'PBR (倍)': info.get('priceToBook'), 'PSR (倍)': info.get('priceToSalesTrailing12Months'), 'ROE (%)': roe_info * 100 if roe_info else None, '自己資本比率 (%)': latest_equity_ratio, '年間1株配当 (円)': info.get('trailingAnnualDividendRate'), '配当利回り (%)': info.get('trailingAnnualDividendYield') * 100 if info.get('trailingAnnualDividendYield') else None}
         metrics.append(latest_metrics)
 
         df = pd.DataFrame(metrics).set_index('決算日').sort_index(ascending=True)
         df['EPS成長率 (対前年比) (%)'] = df['EPS (円)'].pct_change(fill_method=None) * 100
-        
         return df.sort_index(ascending=False)
 
     def calculate_peg_ratios(self, ticker_obj, info: dict) -> dict:
-        results = {
-            'cagr_growth': {'value': None, 'growth': None, 'reason': 'データ不足', 'eps_points': [], 'start_eps': None, 'end_eps': None, 'years': 0},
-            'single_year': {'value': None, 'growth': None, 'reason': 'データ不足'},
-            'historical_pegs': {},
-            'warnings': []
-        }
-        
+        results = {'cagr_growth': {'value': None, 'growth': None, 'reason': 'データ不足', 'eps_points': [], 'start_eps': None, 'end_eps': None, 'years': 0}, 'single_year': {'value': None, 'growth': None, 'reason': 'データ不足'}, 'historical_pegs': {}, 'warnings': []}
         try:
             current_per = info.get('trailingPE')
-            if not current_per:
+            if not current_per or current_per <= 0:
                 for key in results:
-                    if key not in ['historical_pegs', 'warnings']: 
-                        results[key]['reason'] = '現在のPERが取得できません'
+                    if key not in ['historical_pegs', 'warnings']: results[key]['reason'] = '現在のPERが無効です'
                 return results
 
             financials = ticker_obj.financials
             if financials.empty or 'Basic EPS' not in financials.index:
                 for key in results:
-                    if key not in ['historical_pegs', 'warnings']:
-                        results[key]['reason'] = 'EPSデータが見つかりません'
+                    if key not in ['historical_pegs', 'warnings']: results[key]['reason'] = 'EPSデータが見つかりません'
                 return results
 
             annual_eps_data = financials.loc['Basic EPS'].dropna().sort_index(ascending=False)
-            
             if len(annual_eps_data) >= 2:
                 latest_annual_eps, prev_annual_eps = annual_eps_data.iloc[0], annual_eps_data.iloc[1]
                 if pd.notna(latest_annual_eps) and pd.notna(prev_annual_eps) and prev_annual_eps > 0:
@@ -674,75 +559,50 @@ class IntegratedDataHandler:
                     if growth > 0:
                         results['single_year']['value'] = current_per / (growth * 100)
                         results['single_year']['reason'] = None
-                    else:
-                        results['single_year']['reason'] = '単年成長率がマイナス'
-                else:
-                    results['single_year']['reason'] = 'EPSデータ欠損または前期がマイナス'
+                    else: results['single_year']['reason'] = '単年成長率がマイナス'
+                else: results['single_year']['reason'] = 'EPSデータ欠損または前期がマイナス'
             
             trailing_eps = info.get('trailingEps')
             if trailing_eps is not None:
                 points = [trailing_eps] + annual_eps_data.tolist()
                 valid_points = [p for p in points if pd.notna(p)]
                 results['cagr_growth']['eps_points'] = valid_points
-
                 if len(valid_points) >= 2:
-                    start_eps = valid_points[-1] 
-                    end_eps = valid_points[0]   
-                    years = len(valid_points) - 1
-                    results['cagr_growth']['start_eps'] = start_eps
-                    results['cagr_growth']['end_eps'] = end_eps
-                    results['cagr_growth']['years'] = years
-
+                    start_eps, end_eps, years = valid_points[-1], valid_points[0], len(valid_points) - 1
+                    results['cagr_growth'].update({'start_eps': start_eps, 'end_eps': end_eps, 'years': years})
                     if start_eps < 0 and end_eps > 0:
-                        eps_improvement = end_eps - start_eps
-                        results['cagr_growth']['growth'] = float('inf')
-                        results['cagr_growth']['reason'] = f"{years}年でEPSが{eps_improvement:+.2f}改善"
-                        results['cagr_growth']['value'] = None
+                        results['cagr_growth'].update({'growth': float('inf'), 'reason': f"{years}年でEPSが{end_eps - start_eps:+.2f}改善", 'value': None})
                         results['warnings'].append('注記: 赤字から黒字に転換したためPEGは計算できませんが、EPSの絶対額は改善しています。')
-
                     elif start_eps > 0 and end_eps > 0:
                         cagr = (end_eps / start_eps)**(1/years) - 1
                         results['cagr_growth']['growth'] = cagr
                         if cagr > 0:
-                            results['cagr_growth']['value'] = current_per / (cagr * 100)
-                            results['cagr_growth']['reason'] = f'{years}年間のCAGR'
-                        else:
-                            results['cagr_growth']['reason'] = f'{years}年CAGRがマイナス'
+                            results['cagr_growth'].update({'value': current_per / (cagr * 100), 'reason': f'{years}年間のCAGR'})
+                        else: results['cagr_growth']['reason'] = f'{years}年CAGRがマイナス'
                     else:
                         results['cagr_growth']['reason'] = '開始/終了EPSがマイナスまたはゼロのため計算不能'
-                        if start_eps <= 0:
-                            results['warnings'].append('注記: 開始EPSがマイナスまたはゼロのため、CAGRベースのPEGは計算できません。')
-
-                else:
-                    results['cagr_growth']['reason'] = '有効なEPSが2地点未満'
+                        if start_eps <= 0: results['warnings'].append('注記: 開始EPSがマイナスまたはゼロのため、CAGRベースのPEGは計算できません。')
+                else: results['cagr_growth']['reason'] = '有効なEPSが2地点未満'
 
             history = ticker_obj.history(period="6y")
             if not history.empty and len(annual_eps_data) >= 2:
                 history.index = history.index.tz_localize(None)
                 for i in range(len(annual_eps_data) - 1):
-                    eps_curr = annual_eps_data.iloc[i]
-                    eps_prev = annual_eps_data.iloc[i+1]
-                    year_date = annual_eps_data.index[i]
-                    
-                    if pd.notna(eps_curr) and pd.notna(eps_prev) and eps_prev > 0:
+                    eps_curr, eps_prev, year_date = annual_eps_data.iloc[i], annual_eps_data.iloc[i+1], annual_eps_data.index[i]
+                    if pd.notna(eps_curr) and eps_curr > 0 and pd.notna(eps_prev) and eps_prev > 0:
                         yoy_growth = (eps_curr - eps_prev) / eps_prev
                         if yoy_growth > 0:
                             price_at_fis_year = history.asof(year_date)['Close'] if not history.empty and not history.asof(year_date).empty else None
                             if price_at_fis_year:
-                                historical_per = price_at_fis_year / eps_curr
-                                peg = historical_per / (yoy_growth * 100)
-                                results['historical_pegs'][f"{year_date.year}年度"] = peg
-
+                                results['historical_pegs'][f"{year_date.year}年度"] = (price_at_fis_year / eps_curr) / (yoy_growth * 100)
         except Exception as e:
             logger.error(f"PEGレシオ計算中にエラー: {e}", exc_info=True)
-
         return results
 
     def perform_full_analysis(self, ticker_code: str, options: dict) -> dict:
         result = {'ticker_code': ticker_code, 'warnings': [], 'buffett_code_data': {}, 'timeseries_df': pd.DataFrame()}
         try:
             logger.info(f"--- 銘柄 {ticker_code} の分析を開始 ---")
-            
             info = None
             for attempt in range(3):
                 try:
@@ -754,37 +614,44 @@ class IntegratedDataHandler:
                 except Exception as e:
                     logger.warning(f"銘柄 {ticker_code} の情報取得に失敗 ({attempt + 1}/3回目): {e}")
                     if attempt < 2: time.sleep(5)
-            
             if not info or info.get('quoteType') is None:
                 raise ValueError("yfinanceから有効な情報を取得できませんでした。(3回試行後)")
 
-            company_name = info.get('shortName') or info.get('longName') or f"銘柄 {ticker_code}"
-            result['company_name'] = company_name
-            result['yf_info'] = info
+            result.update({'company_name': info.get('shortName') or info.get('longName') or f"銘柄 {ticker_code}", 'yf_info': info})
+            
+            ts_df = self.get_timeseries_financial_metrics(ticker_obj, info)
+            result['timeseries_df'] = ts_df
+            
+            yf_data_for_calc = {**info, **options}
+
+            # ▼▼▼【修正】最新PERが無効な場合、過去のPERで代替するロジック ▼▼▼
+            latest_per = yf_data_for_calc.get('trailingPE')
+            if not latest_per or latest_per <= 0:
+                if ts_df is not None and not ts_df.empty:
+                    historical_data = ts_df[ts_df['年度'] != '最新']
+                    for index, row in historical_data.iterrows():
+                        historical_per = row.get('PER (倍)')
+                        if historical_per and historical_per > 0:
+                            logger.info(f"最新のPERが無効なため、{row['年度']}のPER({historical_per:.2f})を代用します。")
+                            yf_data_for_calc['trailingPE'] = historical_per
+                            result['warnings'].append(f"最新PERが無効なため{row['年度']}のPER({historical_per:.2f})を代用")
+                            break
             
             for statement, path in {"貸借対照表": "bs", "損益計算書": "pl"}.items():
                 url = f"https://www.buffett-code.com/company/{ticker_code}/financial/{path}"
                 soup = self.get_html_soup(url)
                 if soup:
                     all_data = self.extract_all_financial_data(soup)
-                    if all_data:
-                        result['buffett_code_data'][statement] = all_data
-                    else:
-                        logger.warning(f"Buffett-Codeから{statement}のデータ解析に失敗。")
-                        result['buffett_code_data'][statement] = {}
-                        raise ValueError(f"バフェットコードからの{statement}データ取得・解析に失敗しました。")
-                else:
-                    raise ValueError(f"バフェットコード({url})へのアクセスに失敗しました。")
+                    if all_data: result['buffett_code_data'][statement] = all_data
+                    else: raise ValueError(f"バフェットコードからの{statement}データ取得・解析に失敗しました。")
+                else: raise ValueError(f"バフェットコード({url})へのアクセスに失敗しました。")
 
-            yf_data_for_calc = {**info, **options}
             result['scoring_indicators'] = self._calculate_scoring_indicators(result['buffett_code_data'], yf_data_for_calc)
             result['warnings'].extend(result['scoring_indicators'].pop('calc_warnings', []))
             
-            peg_results = self.calculate_peg_ratios(ticker_obj, info)
+            peg_results = self.calculate_peg_ratios(ticker_obj, yf_data_for_calc)
             result['peg_analysis'] = peg_results
-
-            if peg_results.get('warnings'):
-                result['warnings'].extend(peg_results['warnings'])
+            if peg_results.get('warnings'): result['warnings'].extend(peg_results['warnings'])
 
             cagr_peg_value = peg_results['cagr_growth']['value']
             peg_score_dict = self._calculate_peg_score(cagr_peg_value)
@@ -797,44 +664,25 @@ class IntegratedDataHandler:
             
             result['strategy_scores'] = {}
             for name, weights in STRATEGY_WEIGHTS.items():
-                weighted_score = (
-                    s_safety * weights['safety'] +
-                    s_value * weights['value'] +
-                    s_quality * weights['quality'] +
-                    s_growth * weights['growth']
-                )
-                result['strategy_scores'][name] = weighted_score
-
+                result['strategy_scores'][name] = (s_safety * weights['safety'] + s_value * weights['value'] + s_quality * weights['quality'] + s_growth * weights['growth'])
             result['final_average_score'] = result['strategy_scores']['⚖️ バランス型（バランス）']
 
-            ts_df = self.get_timeseries_financial_metrics(ticker_obj, info)
-            
             if not ts_df.empty:
-                peg_col_name = 'PEG (実績)'
-                peg_df = pd.DataFrame(peg_results['historical_pegs'].items(), columns=['年度', peg_col_name])
+                peg_df = pd.DataFrame(peg_results['historical_pegs'].items(), columns=['年度', 'PEG (実績)'])
                 ts_df = ts_df.reset_index().merge(peg_df, on='年度', how='left').set_index('決算日')
-                
                 latest_index = ts_df[ts_df['年度'] == '最新'].index
-                if not latest_index.empty:
-                    ts_df.loc[latest_index, peg_col_name] = peg_results['single_year']['value']
-            
+                if not latest_index.empty: ts_df.loc[latest_index, 'PEG (実績)'] = peg_results['single_year']['value']
             result['timeseries_df'] = ts_df
-            
             result['yfinance_statements'] = self.get_yfinance_statements(ticker_obj)
-
         except Exception as e:
             logger.error(f"銘柄 {ticker_code} の分析中にエラーが発生しました: {e}", exc_info=True)
             result['error'] = f"分析中にエラーが発生しました: {e}"
-            if 'company_name' not in result:
-                result['company_name'] = f"銘柄 {ticker_code} (エラー)"
+            if 'company_name' not in result: result['company_name'] = f"銘柄 {ticker_code} (エラー)"
         return result
 
 # ==============================================================================
 # 4. GUIアプリケーションクラス (Streamlit)
 # ==============================================================================
-# ...
-# ここから下のUI部分は変更なし
-# ...
 def get_recommendation(score):
     if score is None: return "---", "評価不能"
     if score >= 90: return "★★★★★", "神レベル"
@@ -903,13 +751,11 @@ if 'rf_rate_manual' not in st.session_state:
 if 'rf_rate_fetched' not in st.session_state:
     st.session_state.rf_rate_fetched = False
 
-# ▼▼▼ 修正箇所 ▼▼▼: アプリ起動時に一度だけ実行されるように修正
 if 'data_handler' not in st.session_state:
     st.session_state.data_handler = IntegratedDataHandler()
 
 if not st.session_state.rf_rate_fetched:
     with st.spinner("最新のリスクフリーレートを取得中..."):
-        # st.session_state.data_handler を使用
         rate = st.session_state.data_handler.get_risk_free_rate()
         if rate is not None:
             st.session_state.rf_rate = rate
@@ -937,7 +783,6 @@ if 'results' not in st.session_state:
 def run_analysis_for_all(stocks_to_analyze, options_str):
     options = eval(options_str)
     all_results = {}
-    # st.session_state.data_handler を使用
     data_handler = st.session_state.data_handler
     for stock_info in stocks_to_analyze:
         code = stock_info['code']
@@ -952,7 +797,6 @@ if analyze_button:
     if not input_queries:
         st.error("銘柄コードまたは会社名を入力してください。")
     else:
-        # st.session_state.data_handler を使用
         search_handler = st.session_state.data_handler
         target_stocks = []
         not_found_queries = []
@@ -987,9 +831,6 @@ if analyze_button:
             
             st.session_state.results = all_results
 
-# ...
-# ここから下のUI表示部分は変更なし
-# ...
 if st.session_state.results:
     all_results = st.session_state.results
     
@@ -1091,7 +932,7 @@ if st.session_state.results:
                     note = ""
                     if title == "PEGレシオ (CAGR)" and any("PEG" in w for w in warnings): note = " *"
                     if title == "ネットキャッシュ比率" and any(k in w for w in warnings for k in ["NC比率", "負債", "有価証券"]): note = " *"
-                    if title == "キャッシュニュートラルPER" and any(k in w for w in warnings for k in ["NC比率", "負債", "有価証券"]): note = " *"
+                    if title == "キャッシュニュートラルPER" and any(k in w for w in warnings for k in ["NC比率", "負債", "有価証券", "PER"]): note = " *"
                     if title == "ROIC" and any("ROIC" in w for w in warnings): note = " *"
                     
                     val = data.get('value')
@@ -1143,12 +984,12 @@ if st.session_state.results:
                     peg_analysis = result.get('peg_analysis', {})
                     peg_data = peg_analysis.get('cagr_growth', {})
                     
-                    peg_warnings = peg_analysis.get('warnings')
+                    peg_warnings = [w for w in result.get('warnings', []) if "PEG" in w or "PER" in w]
                     if peg_warnings:
                         st.info(" ".join(list(set(peg_warnings))))
                     
                     st.markdown(f"**計算式:** `PER / (EPSのCAGR * 100)`")
-                    per_val = indicators.get('variables', {}).get('PER (実績)')
+                    per_val = result.get('scoring_indicators', {}).get('variables', {}).get('PER (実績)')
                     if peg_data.get('value') is not None and isinstance(per_val, (int, float)):
                         st.text(f"PER {per_val:.2f} / (CAGR {peg_data.get('growth', 0)*100:.2f} %) = {peg_data.get('value'):.2f}")
                         
@@ -1183,6 +1024,9 @@ if st.session_state.results:
                 
                 with tabs[3]: # キャッシュニュートラルPER計算
                     st.subheader("キャッシュニュートラルPERの計算過程")
+                    cnper_warnings = [w for w in result.get('warnings', []) if "PER" in w]
+                    if cnper_warnings:
+                        st.info(" ".join(list(set(cnper_warnings))))
                     st.markdown(f"**計算式:** `実績PER * (1 - ネットキャッシュ比率)`")
                     formula = indicators.get('formulas', {}).get('キャッシュニュートラルPER', indicators.get('cn_per', {}).get('reason'))
                     st.text(formula)
