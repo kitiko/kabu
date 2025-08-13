@@ -14,6 +14,7 @@ import japanize_matplotlib
 import unicodedata
 import random
 import json
+import os  # ファイルパスを扱うためにosモジュールをインポート
 
 # ==============================================================================
 # 1. ログ設定
@@ -91,7 +92,11 @@ def create_copy_button(text_to_copy: str, button_text: str, key: str):
 # ==============================================================================
 # 3. 銘柄検索用のヘルパー関数とデータロード
 # ==============================================================================
-JPX_STOCK_LIST_PATH = "jpx_list.xls"
+# ▼▼▼ 修正箇所 ▼▼▼
+# スクリプト自身の絶対パスを取得し、それを基準にjpx_list.xlsへのパスを生成
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+JPX_STOCK_LIST_PATH = os.path.join(BASE_DIR, "jpx_list.xls")
+# ▲▲▲ 修正箇所 ▲▲▲
 
 @st.cache_data
 def load_jpx_stock_list():
@@ -1118,7 +1123,7 @@ if st.session_state.results:
                 f"キャッシュニュートラルPER: {format_for_copy(cnper_data)}\n"
                 f"ROIC: {format_for_copy(roic_data)}"
             )
-            # ▼▼▼ 修正箇所 ▼▼▼: 自作のコピーボタン関数を呼び出す
+            
             create_copy_button(copy_text, "📋 結果をコピー", key=f"copy_{display_key.replace(' ','_')}")
         
         st.markdown(f"#### 総合スコア ({strategy_name}): <span style='font-size: 28px; font-weight: bold; color: {score_color};'>{score_text}点</span> <span style='font-size: 32px;'>{stars_text}</span>", unsafe_allow_html=True)
