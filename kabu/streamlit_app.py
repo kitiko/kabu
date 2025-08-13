@@ -23,6 +23,60 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
+# 1.5. アクセスコントロール
+# ==============================================================================
+class BrowserRotator:
+    def __init__(self):
+        # より広範囲のバージョンと統計に基づく重み付け
+        self.chrome_versions = [
+            ("chrome116", 5),    # 重み付け（使用頻度）
+            ("chrome117", 8),
+            ("chrome118", 15),
+            ("chrome119", 20),
+            ("chrome120", 25),
+            ("chrome123", 15),
+            ("chrome124", 12)
+        ]
+
+        # モバイルとデスクトップの混合
+        self.mobile_versions = [
+            "chrome120_android",
+            "chrome131_android"
+        ]
+
+        # Safariバージョンも含める
+        self.safari_versions = [
+            "safari15_3",
+            "safari17_0",
+            "safari18_0"
+        ]
+
+    def get_random_browser(self):
+        """
+        統計に基づいてランダムなブラウザ偽装バージョンを返す
+        """
+        # 統計に基づいてブラウザタイプを選択
+        browser_types = [
+            ("chrome", 65),      # Chrome 65%
+            ("mobile", 25),      # モバイル 25%
+            ("safari", 10)       # Safari 10%
+        ]
+        
+        # ブラウザタイプをその重みに基づいて選択
+        browser_type_population = [bt[0] for bt in browser_types]
+        browser_type_weights = [bt[1] for bt in browser_types]
+        chosen_type = random.choices(browser_type_population, weights=browser_type_weights, k=1)[0]
+        
+        # 選択されたタイプに基づいてバージョンを返す
+        if chosen_type == "chrome":
+            versions, weights = zip(*self.chrome_versions)
+            return random.choices(versions, weights=weights, k=1)[0]
+        elif chosen_type == "mobile":
+            return random.choice(self.mobile_versions)
+        else: # safari
+            return random.choice(self.safari_versions)
+
+# ==============================================================================
 # 2. 新しい確実なコピーボタン
 # ==============================================================================
 def create_copy_button(text_to_copy: str, button_text: str, key: str):
@@ -168,16 +222,34 @@ class IntegratedDataHandler:
     """両プログラムのデータ取得・分析ロジックを統合"""
     
     def __init__(self):
-        """初期化時に銘柄リストを読み込む"""
+        """初期化時にはセッションを生成せず、銘柄リストとローテーターを準備"""
         self.stock_list_df = load_jpx_stock_list()
+        self.browser_rotator = BrowserRotator() # BrowserRotatorをインスタンス化
+        self.session = None  # 初期状態ではセッションをNoneに設定
+
+    def _reset_session(self):
+        """
+        【修正】BrowserRotatorを使用してセッションを準備するメソッド。
+        """
+        logger.info("新しいセッションを初期化します...")
         self.session = curl_requests.Session()
-        self.session.impersonate = "chrome120"
+        
         try:
-            logger.info("バフェットコードへのセッションを初期化します。")
-            # 初期アクセスには待機時間を設けない（起動速度優先）
+            # BrowserRotatorからランダムなブラウザバージョンを取得
+            selected_version = self.browser_rotator.get_random_browser()
+            
+            self.session.impersonate = selected_version
+            logger.info(f"セッションの偽装バージョンとして '{selected_version}' を使用します。")
+
+            # セッションのウォームアップとしてトップページにアクセス
             self.session.get("https://www.buffett-code.com/", timeout=20)
+            logger.info("セッションのウォームアップに成功しました。")
+
         except Exception as e:
-            logger.warning(f"セッションの初期化に失敗しました: {e}")
+            logger.error(f"セッションの初期化（ウォームアップ）に失敗しました: {e}", exc_info=True)
+            st.error(f"バフェットコードへの初期アクセスに失敗しました。詳細: {e}")
+            self.session = None
+
 
     def get_ticker_info_from_query(self, query: str) -> dict | None:
         """銘柄コードや会社名から銘柄情報を取得する。検索精度を向上。"""
@@ -246,16 +318,23 @@ class IntegratedDataHandler:
         """
         保持しているセッションを使い、指定されたURLからHTMLを取得する。
         """
+        if self.session is None:
+            logger.error("セッションが初期化されていません。リセット処理に失敗した可能性があります。")
+            st.error("セッションが有効ではありません。")
+            return None
+
         logger.info(f"セッションを使ってURLにアクセス: {url}")
         
         try:
-            # ▼▼▼ 修正箇所 ▼▼▼
+            headers = {
+                'Referer': 'https://www.buffett-code.com/'
+            }
+            
             wait_time = random.uniform(3.0, 5.0)
             logger.info(f"{wait_time:.2f}秒待機します...")
             time.sleep(wait_time)
-            # ▲▲▲ 修正箇所 ▲▲▲
             
-            response = self.session.get(url, timeout=25)
+            response = self.session.get(url, timeout=25, headers=headers)
             response.raise_for_status()
             
             logger.info(f"URLへのアクセス成功 (ステータスコード: {response.status_code}): {url}")
@@ -264,39 +343,42 @@ class IntegratedDataHandler:
         except Exception as e:
             logger.error(f"curl_cffiセッションでのアクセス中にエラーが発生しました: {url}, エラー: {e}", exc_info=True)
             st.error(f"バフェットコードへのアクセスに失敗しました。サイトがメンテナンス中か、セキュリティがさらに強化された可能性があります。(エラー: {e})")
-            try:
-                logger.warning("セッションの再初期化を試みます...")
-                self.session = curl_requests.Session()
-                self.session.impersonate = "chrome120"
-                self.session.get("https://www.buffett-code.com/", timeout=20)
-                logger.info("セッションの再初期化に成功しました。")
-            except Exception as se:
-                logger.error(f"セッションの再初期化にも失敗しました: {se}")
             return None
 
     def get_risk_free_rate(self) -> float | None:
-        """curl-cffiセッションを使用してリスクフリーレートを取得する"""
+        """【修正】Investing.com専用の独立したセッションとBrowserRotatorを使用してリスクフリーレートを取得する"""
         url = "https://jp.investing.com/rates-bonds/japan-10-year-bond-yield"
-        logger.info(f"リスクフリーレート取得試行 (curl_cffi使用): {url}")
+        logger.info(f"リスクフリーレート取得試行 (新規セッション使用): {url}")
+        
         try:
-            # ▼▼▼ 修正箇所 ▼▼▼
-            wait_time = random.uniform(3.0, 5.0)
-            logger.info(f"リスクフリーレート取得のため {wait_time:.2f}秒待機します...")
-            time.sleep(wait_time)
-            # ▲▲▲ 修正箇所 ▲▲▲
-            
-            response = self.session.get(url, timeout=25)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, 'html.parser')
-            yield_element = soup.find('div', attrs={'data-test': 'instrument-price-last'})
-            if yield_element:
-                rate = float(yield_element.text.strip()) / 100
-                logger.info(f"リスクフリーレートの取得に成功しました: {rate:.4f}")
-                return rate
-            else:
-                logger.error("金利データが見つかりませんでした。")
-                st.toast("⚠️ 金利データが見つかりませんでした。", icon="⚠️")
-                return None
+            with curl_requests.Session() as temp_session:
+                # BrowserRotatorを使用して偽装バージョンを選択
+                impersonate_version = self.browser_rotator.get_random_browser()
+                temp_session.impersonate = impersonate_version
+                logger.info(f"Investing.comへのアクセスに '{impersonate_version}' を使用します。")
+                
+                time.sleep(random.uniform(1.0, 2.0))
+                
+                response = temp_session.get(url, timeout=25)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                yield_element = soup.find('div', attrs={'data-test': 'instrument-price-last'})
+                
+                if not yield_element:
+                    yield_element = soup.find('div', class_=re.compile(r'instrument-price_last__'))
+
+                if not yield_element:
+                    yield_element = soup.select_one('[data-test="instrument-price-last"], .instrument-price_last__2wE7v')
+
+                if yield_element:
+                    rate = float(yield_element.text.strip()) / 100
+                    logger.info(f"リスクフリーレートの取得に成功しました: {rate:.4f}")
+                    return rate
+                else:
+                    logger.error("金利データが見つかりませんでした。サイトのHTML構造が変更された可能性があります。")
+                    st.toast("⚠️ 金利データが見つかりませんでした。", icon="⚠️")
+                    return None
         except Exception as e:
             logger.error(f"リスクフリーレートの取得に失敗しました: {e}", exc_info=True)
             st.toast("⚠️ リスクフリーレートの取得に失敗しました。", icon="⚠️")
@@ -803,12 +885,117 @@ class IntegratedDataHandler:
             logger.error(f"PEGレシオ計算中にエラー: {e}", exc_info=True)
 
         return results
+    
+    def _format_period(self, period_original: str) -> str:
+        text = period_original.replace('/', '.')
+        try:
+            year, month = text.split('.')
+            return f"{year}年{int(month)}月"
+        except (ValueError, IndexError):
+            return period_original
+
+    def get_shareholder_data(self, soup: BeautifulSoup) -> pd.DataFrame:
+        shareholders_data = []
+        yearly_div = soup.find('div', id='holder-yearly')
+        if not yearly_div or not (table := yearly_div.find('table', class_='history-table')):
+            return pd.DataFrame()
+        headers = [th.get_text(strip=True) for th in table.find('thead').find_all('th')][1:]
+        if tbody := table.find('tbody'):
+            for row in tbody.find_all('tr'):
+                cells = row.find_all('td')
+                if not cells: continue
+                shareholder_name = cells[0].get_text(strip=True)
+                for i, cell in enumerate(cells[1:]):
+                    period = self._format_period(headers[i])
+                    cell_text = cell.get_text("\n", strip=True)
+                    if cell_text == "-": continue
+                    shares_match = re.search(r'([\d,]+)千株', cell_text)
+                    percent_match = re.search(r'([\d\.]+)%', cell_text)
+                    shares = int(shares_match.group(1).replace(',', '')) * 1000 if shares_match else 0
+                    percentage = float(percent_match.group(1)) if percent_match else 0.0
+                    if shares > 0:
+                        shareholders_data.append({'会計期': period, '株主名': shareholder_name, '保有株式数 (株)': shares, '保有割合 (%)': percentage})
+        df = pd.DataFrame(shareholders_data)
+        if not df.empty:
+            df['順位'] = df.groupby('会計期')['保有割合 (%)'].rank(method='first', ascending=False).astype(int)
+        return df
+
+    def get_governance_data(self, soup: BeautifulSoup) -> pd.DataFrame:
+        governance_data = []
+        header = soup.find('h2', string='役員の状況')
+        if not header: return pd.DataFrame()
+
+        tab_container = header.find_next_sibling('div')
+        if not tab_container: return pd.DataFrame()
+
+        if tab_ul := tab_container.find('ul', class_='nav-tabs'):
+            tabs = tab_ul.find_all('a')
+            panes = tab_container.find('div', class_='tab-content').find_all('div', class_='tab-pane')
+            for tab, pane in zip(tabs, panes):
+                period = self._format_period(tab.get_text(strip=True))
+                self._parse_officer_table(pane, period, governance_data)
+        else:
+            period = "最新"
+            self._parse_officer_table(tab_container, period, governance_data)
+        
+        df = pd.DataFrame(governance_data)
+        if not df.empty and '会計期' in df.columns and df['会計期'].str.contains('年').any():
+            df['会計期_dt'] = pd.to_datetime(df['会計期'].str.replace('年', '-').str.replace('月', ''), format='%Y-%m', errors='coerce')
+            df = df.sort_values(by='会計期_dt', ascending=False).drop(columns='会計期_dt')
+        return df
+
+    def _parse_officer_table(self, container, period, data_list):
+        officer_table = container.find('table', class_='officer__history-table')
+        if not officer_table or not (tbody := officer_table.find('tbody')): return
+        
+        for row in tbody.find_all('tr'):
+            cols = row.find_all('td')
+            if len(cols) < 5: continue
+            position = cols[0].get_text(strip=True)
+            name_parts = cols[1].get_text(separator='|', strip=True).split('|')
+            name = name_parts[0] if name_parts else ''
+            birth_date = name_parts[1] if len(name_parts) > 1 else ''
+            age = name_parts[2] if len(name_parts) > 2 else ''
+            shares_text = cols[4].get_text(strip=True).replace(',', '')
+            shares = int(shares_text) if shares_text.isdigit() else 0
+            data_list.append({'会計期': period, '役職': position, '氏名': name, '生年月日': birth_date, '年齢': age, '役員としての所有株式数': shares})
+
+    def get_shareholder_and_governance_data(self, ticker_code: str) -> dict:
+        s_soup = self.get_html_soup(f"https://www.buffett-code.com/company/{ticker_code}/mainshareholder")
+        g_soup = self.get_html_soup(f"https://www.buffett-code.com/company/{ticker_code}/governance")
+
+        df_shareholders = self.get_shareholder_data(s_soup) if s_soup else pd.DataFrame()
+        df_governance = self.get_governance_data(g_soup) if g_soup else pd.DataFrame()
+        
+        is_owner_executive = False
+        if not df_governance.empty:
+            df_governance['大株主としての保有株式数'] = 0
+            df_governance['大株主としての保有割合 (%)'] = 0.0
+
+        if not df_shareholders.empty and not df_governance.empty:
+            df_shareholders['照合名'] = df_shareholders['株主名'].str.replace(' ', '').str.replace('　', '')
+            df_shareholders['会計期_dt'] = pd.to_datetime(df_shareholders['会計期'].str.replace('年', '-').str.replace('月', ''), format='%Y-%m', errors='coerce')
+            latest_shares = df_shareholders.sort_values('会計期_dt').drop_duplicates('照合名', keep='last')
+            shareholder_map = latest_shares.set_index('照合名')[['保有株式数 (株)', '保有割合 (%)']].apply(tuple, axis=1).to_dict()
+
+            for index, row in df_governance.iterrows():
+                governance_name_normalized = row['氏名'].replace(' ', '').replace('　', '')
+                if governance_name_normalized in shareholder_map:
+                    share_count, percentage = shareholder_map[governance_name_normalized]
+                    df_governance.loc[index, '大株主としての保有株式数'] = share_count
+                    df_governance.loc[index, '大株主としての保有割合 (%)'] = percentage
+                    is_owner_executive = True
+        
+        return {"shareholders_df": df_shareholders, "governance_df": df_governance, "is_owner_executive": is_owner_executive}
 
     def perform_full_analysis(self, ticker_code: str, options: dict) -> dict:
         result = {'ticker_code': ticker_code, 'warnings': [], 'buffett_code_data': {}, 'timeseries_df': pd.DataFrame()}
         try:
             logger.info(f"--- 銘柄 {ticker_code} の分析を開始 ---")
             
+            if self.session is None:
+                raise ValueError("セッションが正常に初期化されませんでした。")
+
             info = None
             for attempt in range(3):
                 try:
@@ -887,6 +1074,17 @@ class IntegratedDataHandler:
             result['timeseries_df'] = ts_df
             
             result['yfinance_statements'] = self.get_yfinance_statements(ticker_obj)
+
+            try:
+                shareholder_data = self.get_shareholder_and_governance_data(ticker_code)
+                result.update(shareholder_data)
+                logger.info(f"銘柄 {ticker_code} の大株主・役員情報の取得に成功。")
+            except Exception as e:
+                logger.error(f"銘柄 {ticker_code} の大株主・役員情報の取得中にエラー: {e}", exc_info=True)
+                result['warnings'].append("大株主・役員情報の取得に失敗しました。")
+                result['shareholders_df'] = pd.DataFrame()
+                result['governance_df'] = pd.DataFrame()
+                result['is_owner_executive'] = False
 
         except Exception as e:
             logger.error(f"銘柄 {ticker_code} の分析中にエラーが発生しました: {e}", exc_info=True)
@@ -999,6 +1197,10 @@ def run_analysis_for_all(stocks_to_analyze, options_str):
     options = eval(options_str)
     all_results = {}
     data_handler = st.session_state.data_handler
+    
+    # 分析開始前に必ずセッションをリセット・初期化する
+    data_handler._reset_session() 
+
     for stock_info in stocks_to_analyze:
         code = stock_info['code']
         result = data_handler.perform_full_analysis(code, options)
@@ -1082,11 +1284,37 @@ if st.session_state.results:
         
         col1, col2, col3 = st.columns([0.55, 0.3, 0.15])
         with col1:
+            # ▼▼▼【修正箇所】大株主役員バッジの表示ロジック ▼▼▼
+            is_owner_exec = result.get('is_owner_executive', False)
+            
+            owner_badge = ""
+            if is_owner_exec:
+                owner_badge_style = (
+                    "display: inline-block; "
+                    "vertical-align: middle; "
+                    "padding: 3px 8px; "
+                    "font-size: 13px; "
+                    "font-weight: bold; "
+                    "color: white; "
+                    "background-color: #28a745; "
+                    "border-radius: 12px; "
+                    "margin-left: 10px;"
+                )
+                owner_badge = f"<span style='{owner_badge_style}'>大株主役員</span>"
+
             sector = result.get('sector', '')
+            sector_span = ""
             if sector and pd.notna(sector):
-                st.markdown(f"### {display_key} <span style='font-size: 16px; color: grey; font-weight: normal; margin-left: 10px;'>({sector})</span>", unsafe_allow_html=True)
-            else:
-                st.markdown(f"### {display_key}")
+                sector_span_style = (
+                    "font-size: 16px; "
+                    "color: grey; "
+                    "font-weight: normal; "
+                    "margin-left: 10px;"
+                )
+                sector_span = f"<span style='{sector_span_style}'>({sector})</span>"
+            
+            st.markdown(f"### {display_key} {owner_badge} {sector_span}", unsafe_allow_html=True)
+            # ▲▲▲ 修正ここまで ▲▲▲
         
         with col2:
             info = result.get('yf_info', {})
@@ -1174,10 +1402,11 @@ if st.session_state.results:
             show_metric(cols[3], "ROIC", "収益性・資本効率", indicators.get('roic', {}), result.get('warnings', []))
             
             with st.expander("詳細データを見る"):
-                tabs = st.tabs([
-                    "時系列指標", "PEGレシオ (CAGR) 計算", "ネットキャッシュ比率計算", "キャッシュニュートラルPER計算", "ROIC計算", "WACC計算",
+                tab_titles = [
+                    "時系列指標", "大株主・役員", "PEGレシオ (CAGR) 計算", "ネットキャッシュ比率計算", "キャッシュニュートラルPER計算", "ROIC計算", "WACC計算",
                     "PEGレシオコメント", "専門家コメント", "財務諸表(バフェットコード)", "ヤフーファイナンス財務"
-                ])
+                ]
+                tabs = st.tabs(tab_titles)
                 
                 with tabs[0]: # 時系列指標
                     ts_df = result.get('timeseries_df')
@@ -1192,8 +1421,62 @@ if st.session_state.results:
                         st.dataframe(df_to_display.style.format(numeric_cols, na_rep="-"))
                     else:
                         st.warning("時系列データを取得できませんでした。")
+                
+                with tabs[1]:
+                    st.subheader(f"大株主・役員情報 ({result.get('ticker_code')})")
+                    df_s = result.get('shareholders_df')
+                    df_g = result.get('governance_df')
+                    is_owner_executive = result.get('is_owner_executive', False)
+                    ticker_code = result.get('ticker_code')
 
-                with tabs[1]: # PEGレシオ (CAGR) 計算
+                    if df_s is None and df_g is None:
+                         st.warning(f"{ticker_code} の大株主・役員データ取得に失敗したか、情報がありませんでした。")
+                    else:
+                        if is_owner_executive:
+                            st.success("✅ **注目:** 役員に大株主が含まれています！（役員リスト内で緑色の太字で表示）", icon="⭐")
+                        
+                        tab1_sh, tab2_gov = st.tabs(["大株主リスト", "役員リスト"])
+
+                        with tab1_sh:
+                            st.subheader(f"大株主リスト")
+                            if df_s is not None and not df_s.empty:
+                                s_periods = df_s['会計期'].unique()
+                                s_selected_period = st.selectbox('会計期を選択:', options=s_periods, key=f"s_period_{ticker_code}")
+                                s_display_df = df_s.loc[df_s['会計期'] == s_selected_period, ['順位', '株主名', '保有割合 (%)', '保有株式数 (株)']]
+                                st.dataframe(s_display_df.style.format({'保有株式数 (株)': '{:,.0f}','保有割合 (%)': '{:.2f}%'}), use_container_width=True, hide_index=True)
+                                st.download_button("📋 全期間の[大株主]データをCSVダウンロード", df_s.to_csv(index=False).encode('utf-8-sig'), f"shareholders_{ticker_code}.csv", 'text/csv', use_container_width=True, key=f"dl_s_{ticker_code}")
+                            else:
+                                st.warning("大株主情報が見つかりませんでした。", icon="⚠️")
+
+                        with tab2_gov:
+                            st.subheader(f"役員リスト")
+                            if df_g is not None and not df_g.empty:
+                                def highlight_owner_executive(row):
+                                    is_owner = row.get('大株主としての保有株式数', 0) > 0
+                                    return ['color: #008000; font-weight: bold;'] * len(row) if is_owner else [''] * len(row)
+                                
+                                if '会計期' in df_g.columns and '会計期_dt' in df_g.columns: # Check if datetime conversion was successful
+                                    latest_period_row = df_g.loc[df_g['会計期_dt'].idxmax()]
+                                    latest_period = latest_period_row['会計期']
+                                    st.info(f"最新の役員情報（{latest_period}時点）を表示しています。")
+                                    g_display_df = df_g.loc[df_g['会計期'] == latest_period].copy()
+                                else:
+                                    g_display_df = df_g.copy()
+
+                                display_columns = ['役職', '氏名', '生年月日', '年齢', '役員としての所有株式数', '大株主としての保有株式数', '大株主としての保有割合 (%)']
+                                display_columns = [col for col in display_columns if col in g_display_df.columns]
+                                g_display_df = g_display_df[display_columns]
+
+                                st.dataframe(
+                                    g_display_df.style.format({
+                                        '役員としての所有株式数': '{:,.0f}', '大株主としての保有株式数': '{:,.0f}', '大株主としての保有割合 (%)': '{:.2f}%'
+                                    }).apply(highlight_owner_executive, axis=1),
+                                    use_container_width=True, hide_index=True)
+                                st.download_button("📋 全期間の[役員]データをCSVダウンロード", df_g.to_csv(index=False).encode('utf-8-sig'), f"governance_{ticker_code}.csv", 'text/csv', use_container_width=True, key=f"dl_g_{ticker_code}")
+                            else:
+                                st.warning("役員情報が見つかりませんでした。", icon="⚠️")
+
+                with tabs[2]: # PEGレシオ (CAGR) 計算
                     st.subheader("PEGレシオ (CAGR) の計算過程")
                     peg_analysis = result.get('peg_analysis', {})
                     peg_data = peg_analysis.get('cagr_growth', {})
@@ -1220,7 +1503,7 @@ if st.session_state.results:
                     else:
                         st.warning('EPSデータが不足しています。')
 
-                with tabs[2]: # ネットキャッシュ比率計算
+                with tabs[3]: # ネットキャッシュ比率計算
                     st.subheader("清原式ネットキャッシュ比率の計算過程")
                     nc_warnings = [w for w in result.get('warnings', []) if "NC比率" in w or "純有利子負債" in w or "有価証券" in w or "負債" in w]
                     if nc_warnings:
@@ -1236,7 +1519,7 @@ if st.session_state.results:
                         "時価総額": f"{indicators.get('variables', {}).get('時価総額', 0)/1e6:,.0f} 百万円" if isinstance(indicators.get('variables', {}).get('時価総額'), (int, float)) else "N/A"
                     })
                 
-                with tabs[3]: # キャッシュニュートラルPER計算
+                with tabs[4]: # キャッシュニュートラルPER計算
                     st.subheader("キャッシュニュートラルPERの計算過程")
                     st.markdown(f"**計算式:** `実績PER * (1 - ネットキャッシュ比率)`")
                     formula = indicators.get('formulas', {}).get('キャッシュニュートラルPER', indicators.get('cn_per', {}).get('reason'))
@@ -1250,7 +1533,7 @@ if st.session_state.results:
                         "ネットキャッシュ比率": f"{nc_ratio_val:.2f}" if isinstance(nc_ratio_val, (int, float)) else f"N/A ({indicators.get('net_cash_ratio', {}).get('reason')})"
                     })
 
-                with tabs[4]: # ROIC計算
+                with tabs[5]: # ROIC計算
                     st.subheader("ROICの計算過程")
                     roic_warnings = [w for w in result.get('warnings', []) if "ROIC" in w]
                     if roic_warnings:
@@ -1282,7 +1565,7 @@ if st.session_state.results:
                         roic_vars["純有利子負債(代用)"] = format_value(net_debt_val)
                     st.json(roic_vars)
                 
-                with tabs[5]: # WACC計算
+                with tabs[6]: # WACC計算
                     st.subheader("WACC (加重平均資本コスト) の計算過程")
                     wacc_warnings = [w for w in result.get('warnings', []) if "β値" in w]
                     if wacc_warnings:
@@ -1301,13 +1584,13 @@ if st.session_state.results:
                         "マーケットリスクプレミアム": f"{mrp:.2%}"
                     })
                 
-                with tabs[6]: # PEGレシオコメント
+                with tabs[7]: # PEGレシオコメント
                     st.subheader("PEGレシオに基づく投資家コメント (リンチ / クレイマー)")
                     peg_data = indicators.get('peg', {})
                     commentary = get_peg_investor_commentary(peg_data.get('value'))
                     st.markdown(commentary, unsafe_allow_html=True)
                 
-                with tabs[7]: # 専門家コメント
+                with tabs[8]: # 専門家コメント
                     st.subheader("専門家コメント")
                     nc_ratio = indicators.get('net_cash_ratio', {}).get('value')
                     cn_per = indicators.get('cn_per', {}).get('value')
@@ -1315,7 +1598,7 @@ if st.session_state.results:
                     commentary = get_kiyohara_commentary(nc_ratio, cn_per, net_income)
                     st.markdown(commentary, unsafe_allow_html=True)
 
-                with tabs[8]: # 財務諸表(バフェットコード)
+                with tabs[9]: # 財務諸表(バフェットコード)
                     st.subheader("財務諸表 (バフェットコード)")
                     bc_data = result.get('buffett_code_data', {})
                     pl_data = bc_data.get('損益計算書', {})
@@ -1335,7 +1618,7 @@ if st.session_state.results:
                     else:
                         st.warning("財務諸表データを取得できませんでした。")
                 
-                with tabs[9]: # ヤフーファイナンス財務
+                with tabs[10]: # ヤフーファイナンス財務
                     st.subheader("ヤフーファイナンス財務データ")
                     yf_statements = result.get('yfinance_statements', {})
                     if yf_statements:
@@ -1353,9 +1636,7 @@ if st.session_state.results:
     st.header("👑 時価総額ランキング")
 
     ranking_data = []
-    # all_results は st.session_state.results から取得済み
     for display_key, result in all_results.items():
-        # エラーがなく、yfinance情報が含まれている結果のみを対象
         if 'error' not in result and 'yf_info' in result:
             market_cap = result['yf_info'].get('marketCap')
             sector = result.get('sector', '業種不明')
@@ -1367,30 +1648,57 @@ if st.session_state.results:
                 })
 
     if ranking_data:
-        # Pandas DataFrameを作成
         df_ranking = pd.DataFrame(ranking_data)
         
-        # 時価総額で降順にソート
         df_ranking = df_ranking.sort_values(by="時価総額", ascending=False)
         
-        # 順位をインデックスとして設定
         df_ranking.index = range(1, len(df_ranking) + 1)
         df_ranking.index.name = "順位"
         
-        # 表示用に時価総額をフォーマット
         def format_market_cap_display(cap):
-            if cap >= 1_000_000_000_000:  # 1兆円
+            if cap >= 1_000_000_000_000:
                 return f"{cap / 1_000_000_000_000:,.2f} 兆円"
             else:
                 return f"{cap / 100_000_000:,.2f} 億円"
 
-        # スタイリングのためにコピーを作成し、時価総額列をフォーマット
         df_display = df_ranking.copy()
         df_display['時価総額'] = df_display['時価総額'].apply(format_market_cap_display)
         
         st.dataframe(df_display, use_container_width=True)
     else:
         st.info("ランキングを表示するためのデータがありません。")
+
+    st.markdown("---") 
+
+    st.header("👑 オーナー経営者 保有割合ランキング")
+    owner_executives = []
+    for display_key, result in all_results.items():
+        if 'error' in result: continue
+        
+        df_g = result.get('governance_df')
+        if df_g is not None and not df_g.empty and '大株主としての保有割合 (%)' in df_g.columns:
+            owners = df_g[df_g['大株主としての保有割合 (%)'] > 0]
+            if not owners.empty:
+                top_owner = owners.loc[owners['大株主としての保有割合 (%)'].idxmax()]
+                owner_executives.append({
+                    '銘柄コード': result.get('ticker_code'),
+                    '銘柄名': result.get('company_name'),
+                    '役職': top_owner['役職'],
+                    '氏名': top_owner['氏名'],
+                    '保有割合 (%)': top_owner['大株主としての保有割合 (%)']
+                })
+
+    if owner_executives:
+        ranking_df = pd.DataFrame(owner_executives)
+        ranking_df = ranking_df.sort_values('保有割合 (%)', ascending=False).reset_index(drop=True)
+        ranking_df.index = ranking_df.index + 1
+        ranking_df.index.name = "順位"
+        st.dataframe(
+            ranking_df.style.format({'保有割合 (%)': '{:.2f}%'}),
+            use_container_width=True
+        )
+    else:
+        st.info("分析した銘柄に、大株主を兼ねる役員は見つかりませんでした。")
 
     st.markdown("---") 
 
