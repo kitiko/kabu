@@ -14,7 +14,7 @@ import japanize_matplotlib
 import unicodedata
 import random
 import json
-import os  # ファイルパスを扱うためにosモジュールをインポート
+import os # ファイルパスを扱うためにosモジュールをインポート
 
 # ==============================================================================
 # 1. ログ設定
@@ -60,8 +60,8 @@ def create_copy_button(text_to_copy: str, button_text: str, key: str):
             color: #FF4B4B;
         }}
         #{button_id}.copied {{
-             border-color: #008000;
-             color: #008000;
+            border-color: #008000;
+            color: #008000;
         }}
     </style>
 
@@ -1340,6 +1340,52 @@ if st.session_state.results:
                                 st.markdown(f"**{title}**: データなし")
                     else:
                         st.warning("Yahoo Financeから財務データを取得できませんでした。")
+
+    st.markdown("---") 
+
+    # ▼▼▼▼▼ ここからが追加された機能 ▼▼▼▼▼
+    st.header("👑 時価総額ランキング")
+
+    ranking_data = []
+    # all_results は st.session_state.results から取得済み
+    for display_key, result in all_results.items():
+        # エラーがなく、yfinance情報が含まれている結果のみを対象
+        if 'error' not in result and 'yf_info' in result:
+            market_cap = result['yf_info'].get('marketCap')
+            sector = result.get('sector', '業種不明')
+            if market_cap is not None:
+                ranking_data.append({
+                    "銘柄": display_key,
+                    "業種": sector,
+                    "時価総額": market_cap
+                })
+
+    if ranking_data:
+        # Pandas DataFrameを作成
+        df_ranking = pd.DataFrame(ranking_data)
+        
+        # 時価総額で降順にソート
+        df_ranking = df_ranking.sort_values(by="時価総額", ascending=False)
+        
+        # 順位をインデックスとして設定
+        df_ranking.index = range(1, len(df_ranking) + 1)
+        df_ranking.index.name = "順位"
+        
+        # 表示用に時価総額をフォーマット
+        def format_market_cap_display(cap):
+            if cap >= 1_000_000_000_000:  # 1兆円
+                return f"{cap / 1_000_000_000_000:,.2f} 兆円"
+            else:
+                return f"{cap / 100_000_000:,.2f} 億円"
+
+        # スタイリングのためにコピーを作成し、時価総額列をフォーマット
+        df_display = df_ranking.copy()
+        df_display['時価総額'] = df_display['時価総額'].apply(format_market_cap_display)
+        
+        st.dataframe(df_display, use_container_width=True)
+    else:
+        st.info("ランキングを表示するためのデータがありません。")
+    # ▲▲▲▲▲ ここまでが追加された機能 ▲▲▲▲▲
 
     st.markdown("---") 
 
