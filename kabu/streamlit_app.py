@@ -92,11 +92,9 @@ def create_copy_button(text_to_copy: str, button_text: str, key: str):
 # ==============================================================================
 # 3. 銘柄検索用のヘルパー関数とデータロード
 # ==============================================================================
-# ▼▼▼ 修正箇所 ▼▼▼
 # スクリプト自身の絶対パスを取得し、それを基準にjpx_list.xlsへのパスを生成
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JPX_STOCK_LIST_PATH = os.path.join(BASE_DIR, "jpx_list.xls")
-# ▲▲▲ 修正箇所 ▲▲▲
 
 @st.cache_data
 def load_jpx_stock_list():
@@ -176,6 +174,7 @@ class IntegratedDataHandler:
         self.session.impersonate = "chrome120"
         try:
             logger.info("バフェットコードへのセッションを初期化します。")
+            # 初期アクセスには待機時間を設けない（起動速度優先）
             self.session.get("https://www.buffett-code.com/", timeout=20)
         except Exception as e:
             logger.warning(f"セッションの初期化に失敗しました: {e}")
@@ -250,9 +249,11 @@ class IntegratedDataHandler:
         logger.info(f"セッションを使ってURLにアクセス: {url}")
         
         try:
+            # ▼▼▼ 修正箇所 ▼▼▼
             wait_time = random.uniform(3.0, 5.0)
             logger.info(f"{wait_time:.2f}秒待機します...")
             time.sleep(wait_time)
+            # ▲▲▲ 修正箇所 ▲▲▲
             
             response = self.session.get(url, timeout=25)
             response.raise_for_status()
@@ -278,6 +279,12 @@ class IntegratedDataHandler:
         url = "https://jp.investing.com/rates-bonds/japan-10-year-bond-yield"
         logger.info(f"リスクフリーレート取得試行 (curl_cffi使用): {url}")
         try:
+            # ▼▼▼ 修正箇所 ▼▼▼
+            wait_time = random.uniform(3.0, 5.0)
+            logger.info(f"リスクフリーレート取得のため {wait_time:.2f}秒待機します...")
+            time.sleep(wait_time)
+            # ▲▲▲ 修正箇所 ▲▲▲
+            
             response = self.session.get(url, timeout=25)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, 'html.parser')
@@ -1343,7 +1350,6 @@ if st.session_state.results:
 
     st.markdown("---") 
 
-    # ▼▼▼▼▼ ここからが追加された機能 ▼▼▼▼▼
     st.header("👑 時価総額ランキング")
 
     ranking_data = []
@@ -1385,7 +1391,6 @@ if st.session_state.results:
         st.dataframe(df_display, use_container_width=True)
     else:
         st.info("ランキングを表示するためのデータがありません。")
-    # ▲▲▲▲▲ ここまでが追加された機能 ▲▲▲▲▲
 
     st.markdown("---") 
 
