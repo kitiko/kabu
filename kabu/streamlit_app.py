@@ -311,6 +311,39 @@ class IntegratedDataHandler:
             logger.error(f"リスクフリーレートの取得に失敗しました: {e}", exc_info=True)
             st.toast("⚠️ リスクフリーレートの取得に失敗しました。", icon="⚠️")
             return None
+
+    def get_listing_date(self, ticker_code: str) -> str | None:
+        """Yahoo!ファイナンスから上場年月日を取得する。"""
+        url = f"https://finance.yahoo.co.jp/quote/{ticker_code}.T/profile"
+        logger.info(f"上場年月日取得試行 (新規セッション使用): {url}")
+        try:
+            # 外部サイトへのアクセスのため、専用の一時セッションを使用する
+            with curl_requests.Session() as temp_session:
+                impersonate_version = self.browser_rotator.get_random_browser()
+                temp_session.impersonate = impersonate_version
+                logger.info(f"Yahoo Financeへのアクセスに '{impersonate_version}' を使用します。")
+                time.sleep(random.uniform(1.0, 2.0))
+                response = temp_session.get(url, timeout=25)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # 「上場年月日」のthタグを探す
+                th_tag = soup.find('th', string='上場年月日')
+                if th_tag:
+                    # thタグの次の兄弟要素であるtdタグを取得
+                    td_tag = th_tag.find_next_sibling('td')
+                    if td_tag:
+                        listing_date_str = td_tag.get_text(strip=True)
+                        logger.info(f"銘柄 {ticker_code} の上場年月日 '{listing_date_str}' を取得しました。")
+                        return listing_date_str
+                
+                logger.warning(f"銘柄 {ticker_code} の上場年月日が見つかりませんでした。")
+                return None
+
+        except Exception as e:
+            logger.error(f"上場年月日の取得中にエラーが発生しました ({ticker_code}): {e}", exc_info=True)
+            st.toast(f"⚠️ {ticker_code}の上場日取得に失敗しました。", icon="⚠️")
+            return None
             
     def parse_financial_value(self, s: str) -> int | float | None:
         s = str(s).replace(',', '').strip()
@@ -963,6 +996,21 @@ class IntegratedDataHandler:
             result['company_name'] = company_name
             result['yf_info'] = info
             
+            # ▼▼▼▼▼ ここから上場日チェック機能を追加 ▼▼▼▼▼
+            result['is_ipo_within_5_years'] = False
+            listing_date_str = self.get_listing_date(ticker_code)
+            if listing_date_str:
+                try:
+                    # "YYYY年M月D日" の形式をパース
+                    listing_date = datetime.strptime(listing_date_str, '%Y年%m月%d日')
+                    # 上場日から5年経過していないかチェック
+                    if (datetime.now() - listing_date) < pd.Timedelta(days=365.25 * 5):
+                        result['is_ipo_within_5_years'] = True
+                        logger.info(f"銘柄 {ticker_code} は上場5年以内の銘柄です。")
+                except ValueError as e:
+                    logger.warning(f"上場年月日 '{listing_date_str}' の日付形式の解析に失敗しました: {e}")
+            # ▲▲▲▲▲ ここまで ▲▲▲▲▲
+
             if info.get('trailingPE') is None or info.get('trailingPE') <= 0:
                 logger.info(f"銘柄 {ticker_code}: yfinanceのtrailingPEが不適切なため、代替PERの計算を試みます。")
                 per_result = self._get_alternative_per(ticker_obj, info)
@@ -1206,8 +1254,6 @@ if st.session_state.results:
     selected_strategy = st.radio("表示戦略の切り替え:", strategy_options, horizontal=True, key='result_view_strategy')
     sorted_results = sorted(all_results.items(), key=lambda item: item[1].get('strategy_scores', {}).get(selected_strategy, -1), reverse=True)
 
-    # ### 修正箇所 ###
-    # forループで各銘柄の詳細を表示する
     for display_key, result in sorted_results:
         if 'error' in result:
             with st.expander(f"▼ {display_key} - 分析エラー", expanded=True):
@@ -1222,15 +1268,43 @@ if st.session_state.results:
         st.markdown(f"<hr style='border: 2px solid {score_color};'>", unsafe_allow_html=True)
         
         col1, col2, col3 = st.columns([0.55, 0.3, 0.15])
+        
+        # --- ▼▼▼ ここから修正・機能追加箇所 ▼▼▼ ---
         with col1:
+            # 時価総額と銘柄コードを取得
+            market_cap = result.get('yf_info', {}).get('marketCap')
+            ticker_code = result.get('ticker_code')
+
+            # 1. 上場5年以内の企業にバッジを表示
+            is_ipo_within_5_years = result.get('is_ipo_within_5_years', False)
+            ipo_badge = ""
+            if is_ipo_within_5_years:
+                ipo_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#dc3545; border-radius:12px; margin-left:10px;'>上場5年以内</span>"
+
+            # 2. 時価総額100億円以下の企業にバッジを表示
+            small_cap_badge = ""
+            if market_cap and market_cap <= 10_000_000_000:
+                small_cap_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#007bff; border-radius:12px; margin-left:10px;'>小型株</span>"
+
+            # 3. 株探へのリンクアイコンを追加
+            kabutan_link = ""
+            if ticker_code:
+                kabutan_url = f"https://kabutan.jp/stock/?code={ticker_code}"
+                kabutan_link = f"<a href='{kabutan_url}' target='_blank' title='株探で株価を確認' style='text-decoration:none; margin-left:10px; font-size:20px; vertical-align:middle;'>🔗</a>"
+
+            # 既存のバッジや情報を準備
             is_owner_exec = result.get('is_owner_executive', False)
             owner_badge = ""
             if is_owner_exec:
                 owner_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#28a745; border-radius:12px; margin-left:10px;'>大株主役員</span>"
+            
             sector = result.get('sector', '')
             sector_span = f"<span style='font-size:16px; color:grey; font-weight:normal; margin-left:10px;'>({sector})</span>" if sector and pd.notna(sector) else ""
-            st.markdown(f"### {display_key} {owner_badge} {sector_span}", unsafe_allow_html=True)
-        
+            
+            # 表示順を調整してMarkdownを生成
+            st.markdown(f"### {display_key} {kabutan_link} {ipo_badge} {small_cap_badge} {owner_badge} {sector_span}", unsafe_allow_html=True)
+        # --- ▲▲▲ ここまで修正・機能追加箇所 ▲▲▲ ---
+
         with col2:
             info = result.get('yf_info', {})
             price, change, prev_close = info.get('regularMarketPrice'), info.get('regularMarketChange'), info.get('regularMarketPreviousClose')
@@ -1471,8 +1545,6 @@ if st.session_state.results:
                             else: st.markdown(f"**{title}**: データなし")
                     else: st.warning("Yahoo Financeから財務データを取得できませんでした。")
 
-    # ### 修正箇所 ###
-    # 以下のランキングとグラフのセクションを for ループの外 (このインデント) に配置する
     st.markdown("---") 
     st.header("👑 時価総額ランキング")
 
