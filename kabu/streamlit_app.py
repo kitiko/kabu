@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from curl_cffi import requests as curl_requests
+from curl_cffi.requests.exceptions import ImpersonateError # エラーを直接インポート
 from bs4 import BeautifulSoup
 import logging
 import time
@@ -14,7 +15,7 @@ import japanize_matplotlib
 import unicodedata
 import random
 import json
-import os # ファイルパスを扱うためにosモジュールをインポート
+import os
 
 # ==============================================================================
 # 1. ログ設定
@@ -23,51 +24,86 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
-# 1.5. アクセスコントロール
+# 1.5. アクセスコントロール（再々改善版）
 # ==============================================================================
+
+# アプリの環境でサポートされているブラウザをテストしてリスト化する関数
+@st.cache_data
+def get_supported_browsers():
+    """
+    実行環境で利用可能なブラウザ偽装プロファイルを動的にテストし、
+    サポートされているプロファイルのリストを返す。
+    この処理はアプリ起動時に一度だけ実行される。
+    """
+    # テスト対象とするブラウザの候補リスト
+    potential_browsers = [
+        "chrome124", "chrome123", "chrome120", "chrome119", "chrome117", "chrome116",
+        "chrome120_android", "safari17_0"
+    ]
+    supported = []
+    logger.info("利用可能なブラウザプロファイルの確認を開始します...")
+    for browser in potential_browsers:
+        try:
+            s = curl_requests.Session()
+            s.impersonate = browser
+            s.get("https://www.google.com", timeout=10) 
+            supported.append(browser)
+            logger.info(f"  ✅ プロファイル '{browser}' はサポートされています。")
+        except ImpersonateError:
+            logger.warning(f"  ❌ プロファイル '{browser}' はサポートされていません。")
+        except Exception as e:
+            logger.warning(f"  ⚠️ プロファイル '{browser}' のテスト中にエラーが発生しました: {e}")
+            
+    if not supported:
+        logger.error("重大: サポートされているブラウザプロファイルが見つかりませんでした。")
+        st.error("利用可能なブラウザプロファイルが見つかりませんでした。アプリを続行できません。")
+        
+    return supported
+
 class BrowserRotator:
     def __init__(self):
-        # より広範囲のバージョンと統計に基づく重み付け
-        self.chrome_versions = [
-            ("chrome116", 5),    # 重み付け（使用頻度）
-            ("chrome117", 8),
-            ("chrome118", 15),
-            ("chrome119", 20),
-            ("chrome120", 25),
-            ("chrome123", 15),
-            ("chrome124", 12)
-        ]
+        """
+        サポートされているブラウザのリストを動的に取得し、ローテーターを初期化する
+        """
+        supported_list = get_supported_browsers()
+        if not supported_list:
+            raise RuntimeError("サポートされているブラウザがないため、処理を続行できません。")
 
-        # モバイルとデスクトップの混合
-        self.mobile_versions = [
-            "chrome120_android",
-            "chrome131_android"
-        ]
+        chrome_weights = {
+            "chrome116": 5, "chrome117": 8, "chrome119": 20,
+            "chrome120": 25, "chrome123": 15, "chrome124": 12
+        }
 
-        # Safariバージョンも含める
-        self.safari_versions = [
-            "safari15_3",
-            "safari17_0",
-            "safari18_0"
-        ]
+        self.chrome_versions = []
+        self.mobile_versions = []
+        self.safari_versions = []
+
+        for browser in supported_list:
+            if "android" in browser:
+                self.mobile_versions.append(browser)
+            elif browser.startswith("safari"):
+                self.safari_versions.append(browser)
+            elif browser.startswith("chrome"):
+                weight = chrome_weights.get(browser, 1)
+                self.chrome_versions.append((browser, weight))
+        
+        logger.info(f"初期化完了。Chrome: {[v[0] for v in self.chrome_versions]}, Mobile: {self.mobile_versions}, Safari: {self.safari_versions}")
 
     def get_random_browser(self):
-        """
-        統計に基づいてランダムなブラウザ偽装バージョンを返す
-        """
-        # 統計に基づいてブラウザタイプを選択
-        browser_types = [
-            ("chrome", 65),      # Chrome 65%
-            ("mobile", 25),      # モバイル 25%
-            ("safari", 10)       # Safari 10%
-        ]
+        browser_types = []
+        if self.chrome_versions: browser_types.append(("chrome", 65))
+        if self.mobile_versions: browser_types.append(("mobile", 25))
+        if self.safari_versions: browser_types.append(("safari", 10))
+            
+        if not browser_types:
+            if self.chrome_versions:
+                versions, weights = zip(*self.chrome_versions)
+                return random.choices(versions, weights=weights, k=1)[0]
+            raise RuntimeError("回転に使用できるブラウザがありません。")
         
-        # ブラウザタイプをその重みに基づいて選択
-        browser_type_population = [bt[0] for bt in browser_types]
-        browser_type_weights = [bt[1] for bt in browser_types]
-        chosen_type = random.choices(browser_type_population, weights=browser_type_weights, k=1)[0]
+        population, weights = zip(*browser_types)
+        chosen_type = random.choices(population, weights=weights, k=1)[0]
         
-        # 選択されたタイプに基づいてバージョンを返す
         if chosen_type == "chrome":
             versions, weights = zip(*self.chrome_versions)
             return random.choices(versions, weights=weights, k=1)[0]
@@ -80,64 +116,33 @@ class BrowserRotator:
 # 2. 新しい確実なコピーボタン
 # ==============================================================================
 def create_copy_button(text_to_copy: str, button_text: str, key: str):
-    """
-    外部ライブラリに依存しない、確実なコピーボタンをHTMLとJSで作成する。
-    """
-    # テキストをJavaScriptで安全に扱えるようにエスケープする
     js_escaped_text = json.dumps(text_to_copy)
-    
-    # ボタンのユニークなIDを生成
     button_id = f"copy-btn-{key}"
-
-    # HTML、CSS、JavaScriptを組み合わせたコンポーネント
     html_code = f"""
     <style>
-        /* Streamlitのデフォルトボタンに似せたスタイル */
         #{button_id} {{
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 400;
-            padding: 0.25rem 0.75rem;
-            border-radius: 0.5rem;
-            min-height: 38.4px;
-            margin: 0px;
-            line-height: 1.6;
-            color: #31333F; /* ボタンテキストの色 */
-            background-color: #FFFFFF; /* ボタンの背景色 */
-            border: 1px solid rgba(49, 51, 63, 0.2);
-            cursor: pointer;
-            transition: all .2s ease-in-out;
+            display: inline-flex; align-items: center; justify-content: center;
+            font-weight: 400; padding: 0.25rem 0.75rem; border-radius: 0.5rem;
+            min-height: 38.4px; margin: 0px; line-height: 1.6; color: #31333F;
+            background-color: #FFFFFF; border: 1px solid rgba(49, 51, 63, 0.2);
+            cursor: pointer; transition: all .2s ease-in-out;
         }}
-        #{button_id}:hover {{
-            border-color: #FF4B4B; /* Streamlitのテーマカラー */
-            color: #FF4B4B;
-        }}
-        #{button_id}.copied {{
-            border-color: #008000;
-            color: #008000;
-        }}
+        #{button_id}:hover {{ border-color: #FF4B4B; color: #FF4B4B; }}
+        #{button_id}.copied {{ border-color: #008000; color: #008000; }}
     </style>
-
     <button id="{button_id}">{button_text}</button>
-
     <script>
         document.getElementById('{button_id}').addEventListener('click', function() {{
-            // モダンブラウザのクリップボードAPIを使用
             navigator.clipboard.writeText({js_escaped_text}).then(() => {{
                 let btn = document.getElementById('{button_id}');
                 const originalText = btn.innerHTML;
                 btn.innerHTML = '✅ Copied!';
-                btn.classList.add('copied'); // スタイル変更用のクラスを追加
-                
-                // 2秒後に元のテキストとスタイルに戻す
+                btn.classList.add('copied');
                 setTimeout(() => {{
                     btn.innerHTML = originalText;
                     btn.classList.remove('copied');
                 }}, 2000);
-            }}).catch(err => {{
-                console.error('Failed to copy: ', err);
-            }});
+            }}).catch(err => {{ console.error('Failed to copy: ', err); }});
         }});
     </script>
     """
@@ -146,53 +151,40 @@ def create_copy_button(text_to_copy: str, button_text: str, key: str):
 # ==============================================================================
 # 3. 銘柄検索用のヘルパー関数とデータロード
 # ==============================================================================
-# スクリプト自身の絶対パスを取得し、それを基準にjpx_list.xlsへのパスを生成
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JPX_STOCK_LIST_PATH = os.path.join(BASE_DIR, "jpx_list.xls")
 
 @st.cache_data
 def load_jpx_stock_list():
-    """JPXの上場銘柄一覧を読み込み、キャッシュする"""
     try:
         df = pd.read_excel(JPX_STOCK_LIST_PATH, header=None, engine='xlrd')
-
         if df.shape[1] < 6:
-            st.error(f"銘柄リストファイル({JPX_STOCK_LIST_PATH})の形式が想定と異なります。業種区分を含む列数が不足しています。")
+            st.error(f"銘柄リストファイル({JPX_STOCK_LIST_PATH})の形式が想定と異なります。")
             return pd.DataFrame(columns=['code', 'name', 'market', 'sector', 'normalized_name'])
-
         df = df.iloc[:, [1, 2, 3, 5]]
         df.columns = ['code', 'name', 'market', 'sector']
-        
         df.dropna(subset=['code', 'name'], inplace=True)
-        
         df['code'] = df['code'].apply(lambda x: str(int(x)) if isinstance(x, (int, float)) else str(x).strip().upper())
         df = df[df['code'].str.fullmatch(r'(\d{4}|\d{3}[A-Z])', na=False)]
-        
         df['normalized_name'] = df['name'].apply(normalize_text)
         logger.info(f"銘柄リストをロードしました: {len(df)}件")
         return df
     except FileNotFoundError:
-        st.error(f"銘柄リストファイル ({JPX_STOCK_LIST_PATH}) が見つかりません。JPXサイトからダウンロードして、コードと同じフォルダに配置してください。")
+        st.error(f"銘柄リストファイル ({JPX_STOCK_LIST_PATH}) が見つかりません。")
         return pd.DataFrame(columns=['code', 'name', 'market', 'sector', 'normalized_name'])
     except Exception as e:
         if "xlrd" in str(e).lower():
-            st.error("Excelファイル(.xls)を読み込むためのライブラリ 'xlrd' がインストールされていません。ターミナルで `pip install xlrd` を実行してください。")
+            st.error("Excelファイル(.xls)を読み込むためのライブラリ 'xlrd' がインストールされていません。")
         else:
             st.error(f"銘柄リストの読み込み中に予期せぬエラーが発生しました: {e}")
         return pd.DataFrame(columns=['code', 'name', 'market', 'sector', 'normalized_name'])
 
 def normalize_text(text: str) -> str:
-    """検索クエリと銘柄名を比較のために正規化する"""
-    if not isinstance(text, str):
-        return ""
+    if not isinstance(text, str): return ""
     text = unicodedata.normalize('NFKC', text)
     text = "".join([chr(ord(c) + 96) if "ぁ" <= c <= "ん" else c for c in text])
     text = text.upper()
-    remove_words = [
-        'ホールディングス', 'グループ', '株式会社', '合同会社', '有限会社', 
-        '(株)', '(同)', '(有)', 
-        ' ', '　', '・', '-'
-    ]
+    remove_words = ['ホールディングス', 'グループ', '株式会社', '合同会社', '有限会社', '(株)', '(同)', '(有)', ' ', '　', '・', '-']
     for word in remove_words:
         text = text.replace(word, '')
     return text.strip()
@@ -201,61 +193,38 @@ def normalize_text(text: str) -> str:
 # 戦略の定義
 # ==============================================================================
 STRATEGY_WEIGHTS = {
-    "⚖️ バランス型（バランス）": {
-        "safety": 0.25, "value": 0.25, "quality": 0.25, "growth": 0.25
-    },
-    "💎 バリュー重視（価値重視）": {
-        "safety": 0.35, "value": 0.40, "quality": 0.20, "growth": 0.05
-    },
-    "🚀 グロース重視（成長重視）": {
-        "safety": 0.10, "value": 0.20, "quality": 0.35, "growth": 0.35
-    },
-    "🛡️ 健全性重視（安全第一）": {
-        "safety": 0.50, "value": 0.25, "quality": 0.15, "growth": 0.10
-    }
+    "⚖️ バランス型（バランス）": {"safety": 0.25, "value": 0.25, "quality": 0.25, "growth": 0.25},
+    "💎 バリュー重視（価値重視）": {"safety": 0.35, "value": 0.40, "quality": 0.20, "growth": 0.05},
+    "🚀 グロース重視（成長重視）": {"safety": 0.10, "value": 0.20, "quality": 0.35, "growth": 0.35},
+    "🛡️ 健全性重視（安全第一）": {"safety": 0.50, "value": 0.25, "quality": 0.15, "growth": 0.10}
 }
 
 # ==============================================================================
 # データ処理クラス
 # ==============================================================================
 class IntegratedDataHandler:
-    """両プログラムのデータ取得・分析ロジックを統合"""
-    
     def __init__(self):
-        """初期化時にはセッションを生成せず、銘柄リストとローテーターを準備"""
         self.stock_list_df = load_jpx_stock_list()
-        self.browser_rotator = BrowserRotator() # BrowserRotatorをインスタンス化
-        self.session = None  # 初期状態ではセッションをNoneに設定
+        self.browser_rotator = BrowserRotator()
+        self.session = None
 
     def _reset_session(self):
-        """
-        【修正】BrowserRotatorを使用してセッションを準備するメソッド。
-        """
         logger.info("新しいセッションを初期化します...")
         self.session = curl_requests.Session()
-        
         try:
-            # BrowserRotatorからランダムなブラウザバージョンを取得
             selected_version = self.browser_rotator.get_random_browser()
-            
             self.session.impersonate = selected_version
             logger.info(f"セッションの偽装バージョンとして '{selected_version}' を使用します。")
-
-            # セッションのウォームアップとしてトップページにアクセス
             self.session.get("https://www.buffett-code.com/", timeout=20)
             logger.info("セッションのウォームアップに成功しました。")
-
         except Exception as e:
             logger.error(f"セッションの初期化（ウォームアップ）に失敗しました: {e}", exc_info=True)
             st.error(f"バフェットコードへの初期アクセスに失敗しました。詳細: {e}")
             self.session = None
 
-
     def get_ticker_info_from_query(self, query: str) -> dict | None:
-        """銘柄コードや会社名から銘柄情報を取得する。検索精度を向上。"""
         query_original = query.strip()
         query_upper = query_original.upper()
-
         if re.fullmatch(r'(\d{4}|\d{3}[A-Z])', query_upper):
             code_to_search = query_upper
             if not self.stock_list_df.empty:
@@ -266,117 +235,76 @@ class IntegratedDataHandler:
                     logger.warning(f"銘柄コード '{code_to_search}' はリストに存在しませんが、分析を試みます。")
                     return {'code': code_to_search, 'name': f'銘柄 {code_to_search}', 'sector': '業種不明'}
             return {'code': code_to_search, 'name': f'銘柄 {code_to_search}', 'sector': '業種不明'}
-
-        if self.stock_list_df.empty:
-            return None
-
+        if self.stock_list_df.empty: return None
         normalized_query = normalize_text(query_original)
-        if not normalized_query:
-            return None
-
+        if not normalized_query: return None
         matches = self.stock_list_df[self.stock_list_df['normalized_name'].str.contains(normalized_query, na=False)].copy()
-        
         if not matches.empty:
             prime_matches = matches[matches['market'].str.contains('プライム', na=False)]
             target_df = prime_matches if not prime_matches.empty else matches
-
             target_df.loc[:, 'diff'] = target_df['normalized_name'].apply(lambda x: abs(len(x) - len(normalized_query)))
             stock_data = target_df.sort_values(by='diff').iloc[0]
-
             logger.info(f"検索クエリ '{query_original}' から銘柄 '{stock_data['name']} ({stock_data['code']})' を見つけました。")
             return stock_data.to_dict()
-
         logger.warning(f"検索クエリ '{query_original}' に一致する銘柄が見つかりませんでした。")
         return None
 
     YFINANCE_TRANSLATION_MAP = {
-        'Total Revenue': '売上高', 'Revenue': '売上高',
-        'Operating Income': '営業利益', 'Operating Expense': '営業費用',
-        'Cost Of Revenue': '売上原価', 'Gross Profit': '売上総利益',
-        'Selling General And Administration': '販売費及び一般管理費',
-        'Research And Development': '研究開発費',
-        'Pretax Income': '税引前利益', 'Tax Provision': '法人税',
-        'Net Income': '当期純利益', 'Net Income Common Stockholders': '親会社株主に帰属する当期純利益',
-        'Basic EPS': '1株当たり利益 (EPS)', 'Diluted EPS': '希薄化後EPS',
-        'Total Assets': '総資産', 'Current Assets': '流動資産',
-        'Cash And Cash Equivalents': '現金及び現金同等物', 'Cash': '現金',
-        'Receivables': '売上債権', 'Inventory': '棚卸資産',
-        'Total Non Current Assets': '固定資産', 'Net PPE': '有形固定資産',
-        'Goodwill And Other Intangible Assets': 'のれん及びその他無形固定資産',
-        'Total Liabilities Net Minority Interest': '負債合計', 'Current Liabilities': '流動負債',
-        'Payables And Accrued Expenses': '支払手形及び買掛金', 'Current Debt': '短期有利子負債',
-        'Total Non Current Liabilities Net Minority Interest': '固定負債', 'Long Term Debt': '長期有利子負債',
-        'Total Equity Gross Minority Interest': '純資産合計', 'Stockholders Equity': '株主資本',
-        'Retained Earnings': '利益剰余金',
-        'Cash Flow From Continuing Operating Activities': '営業キャッシュフロー',
-        'Cash Flow From Continuing Investing Activities': '投資キャッシュフロー',
-        'Cash Flow From Continuing Financing Activities': '財務キャッシュフロー',
-        'Net Change In Cash': '現金の増減額', 'Free Cash Flow': 'フリーキャッシュフロー',
+        'Total Revenue': '売上高', 'Revenue': '売上高', 'Operating Income': '営業利益', 'Operating Expense': '営業費用',
+        'Cost Of Revenue': '売上原価', 'Gross Profit': '売上総利益', 'Selling General And Administration': '販売費及び一般管理費',
+        'Research And Development': '研究開発費', 'Pretax Income': '税引前利益', 'Tax Provision': '法人税',
+        'Net Income': '当期純利益', 'Net Income Common Stockholders': '親会社株主に帰属する当期純利益', 'Basic EPS': '1株当たり利益 (EPS)',
+        'Diluted EPS': '希薄化後EPS', 'Total Assets': '総資産', 'Current Assets': '流動資産',
+        'Cash And Cash Equivalents': '現金及び現金同等物', 'Cash': '現金', 'Receivables': '売上債権', 'Inventory': '棚卸資産',
+        'Total Non Current Assets': '固定資産', 'Net PPE': '有形固定資産', 'Goodwill And Other Intangible Assets': 'のれん及びその他無形固定資産',
+        'Total Liabilities Net Minority Interest': '負債合計', 'Current Liabilities': '流動負債', 'Payables And Accrued Expenses': '支払手形及び買掛金',
+        'Current Debt': '短期有利子負債', 'Total Non Current Liabilities Net Minority Interest': '固定負債', 'Long Term Debt': '長期有利子負債',
+        'Total Equity Gross Minority Interest': '純資産合計', 'Stockholders Equity': '株主資本', 'Retained Earnings': '利益剰余金',
+        'Cash Flow From Continuing Operating Activities': '営業キャッシュフロー', 'Cash Flow From Continuing Investing Activities': '投資キャッシュフロー',
+        'Cash Flow From Continuing Financing Activities': '財務キャッシュフロー', 'Net Change In Cash': '現金の増減額', 'Free Cash Flow': 'フリーキャッシュフロー',
     }
 
     def get_html_soup(self, url: str) -> BeautifulSoup | None:
-        """
-        保持しているセッションを使い、指定されたURLからHTMLを取得する。
-        """
         if self.session is None:
-            logger.error("セッションが初期化されていません。リセット処理に失敗した可能性があります。")
+            logger.error("セッションが初期化されていません。")
             st.error("セッションが有効ではありません。")
             return None
-
         logger.info(f"セッションを使ってURLにアクセス: {url}")
-        
         try:
-            headers = {
-                'Referer': 'https://www.buffett-code.com/'
-            }
-            
+            headers = {'Referer': 'https://www.buffett-code.com/'}
             wait_time = random.uniform(3.0, 5.0)
             logger.info(f"{wait_time:.2f}秒待機します...")
             time.sleep(wait_time)
-            
             response = self.session.get(url, timeout=25, headers=headers)
             response.raise_for_status()
-            
             logger.info(f"URLへのアクセス成功 (ステータスコード: {response.status_code}): {url}")
             return BeautifulSoup(response.content, 'html.parser')
-
         except Exception as e:
             logger.error(f"curl_cffiセッションでのアクセス中にエラーが発生しました: {url}, エラー: {e}", exc_info=True)
-            st.error(f"バフェットコードへのアクセスに失敗しました。サイトがメンテナンス中か、セキュリティがさらに強化された可能性があります。(エラー: {e})")
+            st.error(f"バフェットコードへのアクセスに失敗しました。(エラー: {e})")
             return None
 
     def get_risk_free_rate(self) -> float | None:
-        """【修正】Investing.com専用の独立したセッションとBrowserRotatorを使用してリスクフリーレートを取得する"""
         url = "https://jp.investing.com/rates-bonds/japan-10-year-bond-yield"
         logger.info(f"リスクフリーレート取得試行 (新規セッション使用): {url}")
-        
         try:
             with curl_requests.Session() as temp_session:
-                # BrowserRotatorを使用して偽装バージョンを選択
                 impersonate_version = self.browser_rotator.get_random_browser()
                 temp_session.impersonate = impersonate_version
                 logger.info(f"Investing.comへのアクセスに '{impersonate_version}' を使用します。")
-                
                 time.sleep(random.uniform(1.0, 2.0))
-                
                 response = temp_session.get(url, timeout=25)
                 response.raise_for_status()
                 soup = BeautifulSoup(response.content, 'html.parser')
-                
                 yield_element = soup.find('div', attrs={'data-test': 'instrument-price-last'})
-                
-                if not yield_element:
-                    yield_element = soup.find('div', class_=re.compile(r'instrument-price_last__'))
-
-                if not yield_element:
-                    yield_element = soup.select_one('[data-test="instrument-price-last"], .instrument-price_last__2wE7v')
-
+                if not yield_element: yield_element = soup.find('div', class_=re.compile(r'instrument-price_last__'))
+                if not yield_element: yield_element = soup.select_one('[data-test="instrument-price-last"], .instrument-price_last__2wE7v')
                 if yield_element:
                     rate = float(yield_element.text.strip()) / 100
                     logger.info(f"リスクフリーレートの取得に成功しました: {rate:.4f}")
                     return rate
                 else:
-                    logger.error("金利データが見つかりませんでした。サイトのHTML構造が変更された可能性があります。")
+                    logger.error("金利データが見つかりませんでした。")
                     st.toast("⚠️ 金利データが見つかりませんでした。", icon="⚠️")
                     return None
         except Exception as e:
@@ -386,87 +314,59 @@ class IntegratedDataHandler:
             
     def parse_financial_value(self, s: str) -> int | float | None:
         s = str(s).replace(',', '').strip()
-        if s in ['-', '---', '']:
-            return None
+        if s in ['-', '---', '']: return None
         is_negative = s.startswith(('△', '-'))
         s = s.lstrip('△-')
         try:
             total = 0
-            if '兆' in s:
-                total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 1000000
-            elif '億' in s:
-                total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 100
-            elif '百万円' in s:
-                total += float(re.findall(r'(\d+\.?\d*)', s)[0])
-            elif '万円' in s:
-                total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 0.01
-            elif re.match(r'^\d+\.?\d*$', s):
-                total = float(s)
-            else:
-                return s
+            if '兆' in s: total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 1000000
+            elif '億' in s: total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 100
+            elif '百万円' in s: total += float(re.findall(r'(\d+\.?\d*)', s)[0])
+            elif '万円' in s: total += float(re.findall(r'(\d+\.?\d*)', s)[0]) * 0.01
+            elif re.match(r'^\d+\.?\d*$', s): total = float(s)
+            else: return s
             return -int(total) if is_negative else int(total)
-        except (ValueError, TypeError, IndexError):
-            return s
+        except (ValueError, TypeError, IndexError): return s
 
     def extract_all_financial_data(self, soup: BeautifulSoup) -> dict | None:
         financial_table = soup.find('table', class_='financial-table')
-        if not financial_table:
-            return None
+        if not financial_table: return None
         thead, tbody = financial_table.find('thead'), financial_table.find('tbody')
-        if not thead or not tbody:
-            return None
+        if not thead or not tbody: return None
         period_headers = thead.find('tr').find_all('th')
-        if len(period_headers) <= 1:
-            return None
+        if len(period_headers) <= 1: return None
         valid_periods = []
         for i, th in enumerate(period_headers[1:]):
             header_text = th.text.strip()
             if header_text and "E" not in header_text.upper() and "C" not in header_text.upper():
                 valid_periods.append({'name': header_text, 'index': i + 1})
-        if not valid_periods:
-            return None
+        if not valid_periods: return None
         all_periods_data = OrderedDict()
         for row in tbody.find_all('tr'):
             cells = row.find_all(['th', 'td'])
             item_name = cells[0].text.strip()
-            if not item_name or not re.search(r'[a-zA-Z\u3040-\u30FF\u4E00-\u9FFF]', item_name):
-                continue
+            if not item_name or not re.search(r'[a-zA-Z\u3040-\u30FF\u4E00-\u9FFF]', item_name): continue
             for period in valid_periods:
                 period_name = period['name']
-                if period_name not in all_periods_data:
-                    all_periods_data[period_name] = {}
+                if period_name not in all_periods_data: all_periods_data[period_name] = {}
                 if len(cells) > period['index']:
                     display_value = cells[period['index']].get_text(strip=True)
                     if display_value not in ['-', '---', '']:
-                        all_periods_data[period_name][item_name] = {
-                            'display': display_value,
-                            'raw': self.parse_financial_value(display_value)
-                        }
+                        all_periods_data[period_name][item_name] = {'display': display_value, 'raw': self.parse_financial_value(display_value)}
         return all_periods_data
 
     def get_latest_financial_data(self, financial_data_dict: dict) -> dict:
-        latest_year = -1
-        latest_month = -1
-        latest_data = {}
-        if not financial_data_dict:
-            return {}
-            
+        latest_year, latest_month, latest_data = -1, -1, {}
+        if not financial_data_dict: return {}
         for period_name, data in financial_data_dict.items():
             match = re.search(r'(\d{2,4})[./](\d{1,2})', period_name)
             if match:
                 year_str, month_str = match.groups()
                 year = int(year_str)
                 month = int(month_str)
-                
-                if year < 100:
-                    year_full = 2000 + year if year < 50 else 1900 + year
-                else:
-                    year_full = year
-
+                year_full = 2000 + year if year < 50 else 1900 + year if year < 100 else year
                 if year_full > latest_year or (year_full == latest_year and month > latest_month):
-                    latest_year = year_full
-                    latest_month = month
-                    latest_data = data
+                    latest_year, latest_month, latest_data = year_full, month, data
         return latest_data
 
     def get_value(self, data_dict: dict, keys: list[str], log_name: str) -> any:
@@ -479,20 +379,15 @@ class IntegratedDataHandler:
         return None
 
     def format_yfinance_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        if df.empty:
-            return df
-        
+        if df.empty: return df
         df_copy = df.copy()
         df_copy = df_copy.rename(index=self.YFINANCE_TRANSLATION_MAP)
         df_copy = df_copy.loc[df_copy.index.isin(self.YFINANCE_TRANSLATION_MAP.values())]
-
         df_copy.columns = [f"{col.year}.{col.month}" for col in df_copy.columns]
-
         exclude_rows = [name for name in df_copy.index if 'EPS' in name or '比率' in name or 'Rate' in name]
         for idx in df_copy.index:
             if idx not in exclude_rows:
                 df_copy.loc[idx] = df_copy.loc[idx].apply(lambda x: x / 1e6 if pd.notna(x) else np.nan)
-        
         return df_copy
 
     def _linear_interpolate(self, value, x1, y1, x2, y2):
@@ -512,11 +407,8 @@ class IntegratedDataHandler:
         return {'score': 0, 'evaluation': '【要警戒】'}
 
     def _score_cn_per(self, cn_per, keijo_rieki, pe, trailing_eps):
-        if pe is None and trailing_eps is not None and trailing_eps < 0:
-            return {'score': 10, 'evaluation': '【赤字企業 (EPS基準)】'}
-        is_profitable = keijo_rieki is not None and keijo_rieki > 0
-        if not is_profitable:
-            return {'score': 10, 'evaluation': '【赤字・要注意】'}
+        if pe is None and trailing_eps is not None and trailing_eps < 0: return {'score': 10, 'evaluation': '【赤字企業 (EPS基準)】'}
+        if not (keijo_rieki is not None and keijo_rieki > 0): return {'score': 10, 'evaluation': '【赤字・要注意】'}
         if cn_per is None: return {'score': 0, 'evaluation': '---'}
         if cn_per < 0: return {'score': 100, 'evaluation': '【究極の割安株】'}
         if cn_per < 2: return {'score': self._linear_interpolate(cn_per, 0, 100, 2, 95), 'evaluation': '【現金より安い会社】'}
@@ -541,24 +433,80 @@ class IntegratedDataHandler:
     
     def _calculate_peg_score(self, peg_ratio: float | None) -> dict:
         if peg_ratio is None or peg_ratio < 0:
-            score = 0
-            evaluation = "【成長鈍化・赤字】" if peg_ratio is not None else "---"
-        elif peg_ratio <= 0.5:
-            score = 100
-            evaluation = "【超割安な成長株】"
-        elif peg_ratio <= 1.0:
-            score = self._linear_interpolate(peg_ratio, 0.5, 100, 1.0, 70)
-            evaluation = "【割安な成長株】"
-        elif peg_ratio <= 1.5:
-            score = self._linear_interpolate(peg_ratio, 1.0, 70, 1.5, 40)
-            evaluation = "【適正価格】"
-        elif peg_ratio < 2.0:
-            score = self._linear_interpolate(peg_ratio, 1.5, 40, 2.0, 0)
-            evaluation = "【やや割高】"
-        else:
-            score = 0
-            evaluation = "【割高】"
+            score, evaluation = 0, "【成長鈍化・赤字】" if peg_ratio is not None else "---"
+        elif peg_ratio <= 0.5: score, evaluation = 100, "【超割安な成長株】"
+        elif peg_ratio <= 1.0: score, evaluation = self._linear_interpolate(peg_ratio, 0.5, 100, 1.0, 70), "【割安な成長株】"
+        elif peg_ratio <= 1.5: score, evaluation = self._linear_interpolate(peg_ratio, 1.0, 70, 1.5, 40), "【適正価格】"
+        elif peg_ratio < 2.0: score, evaluation = self._linear_interpolate(peg_ratio, 1.5, 40, 2.0, 0), "【やや割高】"
+        else: score, evaluation = 0, "【割高】"
         return {'score': int(score), 'evaluation': evaluation}
+
+    def _get_alternative_per(self, ticker_obj, info: dict) -> dict:
+        """
+        yfinanceでPERが取得できない場合に、他のデータから代替PERを計算する。
+        Returns:
+            dict: {'value': 計算したPER (float|None), 'note': 注記 (str|None)}
+        """
+        # 1. yfinanceの実績PER（trailingPE）を試す
+        trailing_pe = info.get('trailingPE')
+        if trailing_pe is not None and trailing_pe > 0:
+            logger.info(f"PER取得方法1: yfinance.infoから取得しました (trailingPE: {trailing_pe:.2f})")
+            return {'value': trailing_pe, 'note': None}
+
+        # 2. 最新の株価 ÷ 最新のEPSで計算する
+        current_price = info.get('regularMarketPrice')
+        trailing_eps = info.get('trailingEps')
+        if current_price is not None and trailing_eps is not None and trailing_eps > 0:
+            calculated_per = current_price / trailing_eps
+            logger.info(f"PER取得方法2: 最新株価({current_price}) / 最新EPS({trailing_eps}) で計算しました (PER: {calculated_per:.2f})")
+            return {'value': calculated_per, 'note': None}
+
+        # 3 & 4. 過去の決算データから計算
+        try:
+            financials = ticker_obj.financials
+            history = ticker_obj.history(period="3y") # 過去3年分の株価を取得
+
+            if not financials.empty and 'Basic EPS' in financials.index and not history.empty:
+                # タイムゾーン情報を削除して比較しやすくする
+                if hasattr(history.index.dtype, 'tz') and history.index.dtype.tz is not None:
+                    history.index = history.index.tz_localize(None)
+
+                eps_series = financials.loc['Basic EPS'].dropna()
+                
+                # 3. 直近決算日の株価 ÷ 直近決算のEPS
+                if len(eps_series) >= 1:
+                    latest_settlement_date = eps_series.index[0]
+                    latest_eps = eps_series.iloc[0]
+                    
+                    price_on_settlement = history.asof(latest_settlement_date)['Close']
+
+                    if pd.notna(price_on_settlement) and pd.notna(latest_eps) and latest_eps > 0:
+                        calculated_per = price_on_settlement / latest_eps
+                        date_str = latest_settlement_date.strftime('%Y-%m-%d')
+                        note = f"注記: 手計算PER ({date_str}時点)をPERとして代用"
+                        logger.info(f"PER取得方法3: 直近決算データで計算 ({price_on_settlement:.2f} / {latest_eps:.2f} = {calculated_per:.2f})")
+                        return {'value': calculated_per, 'note': note}
+
+                # 4. 2期前の決算日の株価 ÷ 2期前の決算のEPS
+                if len(eps_series) >= 2:
+                    prev_settlement_date = eps_series.index[1]
+                    prev_eps = eps_series.iloc[1]
+
+                    price_on_settlement = history.asof(prev_settlement_date)['Close']
+
+                    if pd.notna(price_on_settlement) and pd.notna(prev_eps) and prev_eps > 0:
+                        calculated_per = price_on_settlement / prev_eps
+                        date_str = prev_settlement_date.strftime('%Y-%m-%d')
+                        note = f"注記: 手計算PER ({date_str}時点)をPERとして代用"
+                        logger.info(f"PER取得方法4: 2期前決算データで計算 ({price_on_settlement:.2f} / {prev_eps:.2f} = {calculated_per:.2f})")
+                        return {'value': calculated_per, 'note': note}
+
+        except Exception as e:
+            logger.warning(f"代替PERの計算中にエラーが発生しました: {e}", exc_info=True)
+
+        logger.warning("全てのPER取得/計算方法が失敗しました。")
+        return {'value': None, 'note': None}
+
 
     def _calculate_scoring_indicators(self, all_fin_data: dict, yf_data: dict) -> dict:
         indicators = {'calc_warnings': [], 'formulas': {}, 'variables': {}}
@@ -599,7 +547,6 @@ class IntegratedDataHandler:
             indicators['calc_warnings'].append(f"信頼性警告: 営業利益の代わりに「{op_income_source}」を使用")
         indicators['variables'][f'NOPAT計算用利益 ({op_income_source})'] = op_income
         net_assets = self.get_value(latest_bs_data, ['純資産合計', '純資産'], '純資産')
-        minority_interest = self.get_value(latest_bs_data, ['非支配株主持分'], '非支配株主持分')
         pretax_income = self.get_value(latest_pl_data, ['税引前利益', '税金等調整前当期純利益'], '税引前利益')
         corp_tax = self.get_value(latest_pl_data, ['法人税等', '法人税、住民税及び事業税'], '法人税等')
         keijo_rieki = self.get_value(latest_pl_data, ['経常利益'], '経常利益')
@@ -695,7 +642,7 @@ class IntegratedDataHandler:
         indicators['wacc'] = {'value': wacc, 'reason': wacc_error}
         
         return indicators
-
+    
     def get_yfinance_statements(self, ticker_obj):
         statements = {
             "年次損益計算書": self.format_yfinance_df(ticker_obj.financials),
@@ -997,6 +944,7 @@ class IntegratedDataHandler:
                 raise ValueError("セッションが正常に初期化されませんでした。")
 
             info = None
+            ticker_obj = None
             for attempt in range(3):
                 try:
                     ticker_obj = yf.Ticker(f"{ticker_code}.T")
@@ -1014,6 +962,17 @@ class IntegratedDataHandler:
             company_name = info.get('shortName') or info.get('longName') or f"銘柄 {ticker_code}"
             result['company_name'] = company_name
             result['yf_info'] = info
+            
+            if info.get('trailingPE') is None or info.get('trailingPE') <= 0:
+                logger.info(f"銘柄 {ticker_code}: yfinanceのtrailingPEが不適切なため、代替PERの計算を試みます。")
+                per_result = self._get_alternative_per(ticker_obj, info)
+                if per_result['value'] is not None:
+                    info['trailingPE'] = per_result['value']
+                    logger.info(f"代替PER ({per_result['value']:.2f}) を採用しました。")
+                    if per_result['note']:
+                        result['warnings'].append(per_result['note'])
+                else:
+                    logger.warning(f"銘柄 {ticker_code}: 代替PERの計算に失敗しました。")
             
             for statement, path in {"貸借対照表": "bs", "損益計算書": "pl"}.items():
                 url = f"https://www.buffett-code.com/company/{ticker_code}/financial/{path}"
@@ -1094,7 +1053,7 @@ class IntegratedDataHandler:
         return result
 
 # ==============================================================================
-# GUIアプリケーションクラス (Streamlit)
+# GUIアプリケーション (Streamlit)
 # ==============================================================================
 def get_recommendation(score):
     if score is None: return "---", "評価不能"
@@ -1157,15 +1116,11 @@ st.set_page_config(page_title="統合型 企業価値分析ツール", layout="w
 st.sidebar.title("分析設定")
 ticker_input = st.sidebar.text_area("銘柄コード or 会社名 (カンマ区切り)", "7203, 336A, ダイナミックマッププラットフォーム")
 
-if 'rf_rate' not in st.session_state:
-    st.session_state.rf_rate = 0.01
-if 'rf_rate_manual' not in st.session_state:
-    st.session_state.rf_rate_manual = st.session_state.rf_rate
-if 'rf_rate_fetched' not in st.session_state:
-    st.session_state.rf_rate_fetched = False
+if 'rf_rate' not in st.session_state: st.session_state.rf_rate = 0.01
+if 'rf_rate_manual' not in st.session_state: st.session_state.rf_rate_manual = st.session_state.rf_rate
+if 'rf_rate_fetched' not in st.session_state: st.session_state.rf_rate_fetched = False
 
-if 'data_handler' not in st.session_state:
-    st.session_state.data_handler = IntegratedDataHandler()
+if 'data_handler' not in st.session_state: st.session_state.data_handler = IntegratedDataHandler()
 
 if not st.session_state.rf_rate_fetched:
     with st.spinner("最新のリスクフリーレートを取得中..."):
@@ -1177,9 +1132,7 @@ if not st.session_state.rf_rate_fetched:
     st.session_state.rf_rate_fetched = True
 
 st.session_state.rf_rate_manual = st.sidebar.number_input(
-    "リスクフリーレート(Rf)", 
-    value=st.session_state.rf_rate_manual, 
-    format="%.4f",
+    "リスクフリーレート(Rf)", value=st.session_state.rf_rate_manual, format="%.4f",
     help="日本の10年国債利回りを基準とします。自動取得に失敗した場合は手動で入力してください。"
 )
 st.session_state.rf_rate = st.session_state.rf_rate_manual 
@@ -1190,24 +1143,7 @@ analyze_button = st.sidebar.button("分析実行")
 st.title("統合型 企業価値分析ツール")
 st.caption(f"最終更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-if 'results' not in st.session_state:
-    st.session_state.results = None
-
-def run_analysis_for_all(stocks_to_analyze, options_str):
-    options = eval(options_str)
-    all_results = {}
-    data_handler = st.session_state.data_handler
-    
-    # 分析開始前に必ずセッションをリセット・初期化する
-    data_handler._reset_session() 
-
-    for stock_info in stocks_to_analyze:
-        code = stock_info['code']
-        result = data_handler.perform_full_analysis(code, options)
-        result['sector'] = stock_info.get('sector', '業種不明') 
-        display_key = f"{result.get('company_name', code)} ({code})"
-        all_results[display_key] = result
-    return all_results
+if 'results' not in st.session_state: st.session_state.results = None
 
 if analyze_button:
     input_queries = [q.strip() for q in ticker_input.split(',') if q.strip()]
@@ -1217,56 +1153,61 @@ if analyze_button:
         search_handler = st.session_state.data_handler
         target_stocks = []
         not_found_queries = []
-        
         with st.spinner("銘柄を検索しています..."):
             for query in input_queries:
                 stock_info = search_handler.get_ticker_info_from_query(query)
-                if stock_info:
+                if stock_info: 
                     target_stocks.append(stock_info)
-                else:
+                else: 
                     not_found_queries.append(query)
         
         unique_target_stocks = list({stock['code']: stock for stock in target_stocks}.values())
-
-        if not_found_queries:
+        
+        if not_found_queries: 
             st.warning(f"以下の銘柄は見つかりませんでした: {', '.join(not_found_queries)}")
-
+            
         if not unique_target_stocks:
-            st.error("分析対象の銘柄が見つかりませんでした。入力内容を確認してください。")
+            st.error("分析対象の銘柄が見つかりませんでした。")
             st.session_state.results = None
         else:
-            display_codes = [s['code'] for s in unique_target_stocks]
-            st.success(f"分析対象: {', '.join(display_codes)}")
+            st.success(f"分析対象: {', '.join([s['code'] for s in unique_target_stocks])}")
+            options = {'risk_free_rate': st.session_state.rf_rate, 'mkt_risk_premium': mrp}
             
-            options = {
-                'risk_free_rate': st.session_state.rf_rate, 
-                'mkt_risk_premium': mrp
-            }
+            progress_bar = st.progress(0)
+            progress_text = st.empty()
             
-            with st.spinner(f'分析中... ({len(unique_target_stocks)}件)'):
-                all_results = run_analysis_for_all(unique_target_stocks, str(options))
+            all_results = {}
+            data_handler = st.session_state.data_handler
+            data_handler._reset_session()
+            
+            total_stocks = len(unique_target_stocks)
+            
+            for i, stock_info in enumerate(unique_target_stocks):
+                progress_text.text(f"分析中... ({i+1}/{total_stocks}件完了): {stock_info.get('name', '')} ({stock_info['code']})")
+                
+                code = stock_info['code']
+                result = data_handler.perform_full_analysis(code, options)
+                result['sector'] = stock_info.get('sector', '業種不明')
+                display_key = f"{result.get('company_name', code)} ({code})"
+                all_results[display_key] = result
+                
+                progress_bar.progress((i + 1) / total_stocks)
+            
+            progress_text.empty()
+            progress_bar.empty()
             
             st.session_state.results = all_results
 
+
 if st.session_state.results:
     all_results = st.session_state.results
-    
     st.header("個別銘柄サマリー")
-
     strategy_options = list(STRATEGY_WEIGHTS.keys())
-    selected_strategy = st.radio(
-        "表示戦略の切り替え:",
-        strategy_options,
-        horizontal=True,
-        key='result_view_strategy'
-    )
+    selected_strategy = st.radio("表示戦略の切り替え:", strategy_options, horizontal=True, key='result_view_strategy')
+    sorted_results = sorted(all_results.items(), key=lambda item: item[1].get('strategy_scores', {}).get(selected_strategy, -1), reverse=True)
 
-    sorted_results = sorted(
-        all_results.items(), 
-        key=lambda item: item[1].get('strategy_scores', {}).get(selected_strategy, -1),
-        reverse=True
-    )
-
+    # ### 修正箇所 ###
+    # forループで各銘柄の詳細を表示する
     for display_key, result in sorted_results:
         if 'error' in result:
             with st.expander(f"▼ {display_key} - 分析エラー", expanded=True):
@@ -1274,127 +1215,65 @@ if st.session_state.results:
             continue 
 
         score = result.get('strategy_scores', {}).get(selected_strategy)
-        strategy_name = selected_strategy
-
-        stars_text = "⭐" * int(get_recommendation(score)[0].count('★')) + "☆" * int(get_recommendation(score)[0].count('☆')) if score is not None else "評価不能"
+        stars_text, _ = get_recommendation(score)
         score_color = "#28a745" if score is not None and score >= 70 else "#ffc107" if score is not None and score >= 40 else "#dc3545"
         score_text = f"{score:.1f}" if score is not None else "N/A"
         
-        st.markdown(f"<hr style='border: 2px solid {score_color}; border-radius: 2px;'>", unsafe_allow_html=True)
+        st.markdown(f"<hr style='border: 2px solid {score_color};'>", unsafe_allow_html=True)
         
         col1, col2, col3 = st.columns([0.55, 0.3, 0.15])
         with col1:
-            # ▼▼▼【修正箇所】大株主役員バッジの表示ロジック ▼▼▼
             is_owner_exec = result.get('is_owner_executive', False)
-            
             owner_badge = ""
             if is_owner_exec:
-                owner_badge_style = (
-                    "display: inline-block; "
-                    "vertical-align: middle; "
-                    "padding: 3px 8px; "
-                    "font-size: 13px; "
-                    "font-weight: bold; "
-                    "color: white; "
-                    "background-color: #28a745; "
-                    "border-radius: 12px; "
-                    "margin-left: 10px;"
-                )
-                owner_badge = f"<span style='{owner_badge_style}'>大株主役員</span>"
-
+                owner_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#28a745; border-radius:12px; margin-left:10px;'>大株主役員</span>"
             sector = result.get('sector', '')
-            sector_span = ""
-            if sector and pd.notna(sector):
-                sector_span_style = (
-                    "font-size: 16px; "
-                    "color: grey; "
-                    "font-weight: normal; "
-                    "margin-left: 10px;"
-                )
-                sector_span = f"<span style='{sector_span_style}'>({sector})</span>"
-            
+            sector_span = f"<span style='font-size:16px; color:grey; font-weight:normal; margin-left:10px;'>({sector})</span>" if sector and pd.notna(sector) else ""
             st.markdown(f"### {display_key} {owner_badge} {sector_span}", unsafe_allow_html=True)
-            # ▲▲▲ 修正ここまで ▲▲▲
         
         with col2:
             info = result.get('yf_info', {})
-            price = info.get('regularMarketPrice')
-            change = info.get('regularMarketChange')
-            previous_close = info.get('regularMarketPreviousClose')
-            
-            change_pct_to_display = None
-            
-            if isinstance(price, (int, float)) and isinstance(previous_close, (int, float)) and previous_close > 0:
-                change_pct_to_display = (price - previous_close) / previous_close
-            else:
-                change_pct_to_display = info.get('regularMarketChangePercent')
-
-            if all(isinstance(x, (int, float)) for x in [price, change, change_pct_to_display]):
-                st.metric(label="現在株価", value=f"{price:,.0f} 円", delta=f"前日比 {change:+.2f}円 ({change_pct_to_display:+.2%})", delta_color="normal")
+            price, change, prev_close = info.get('regularMarketPrice'), info.get('regularMarketChange'), info.get('regularMarketPreviousClose')
+            change_pct = (price - prev_close) / prev_close if all(isinstance(x, (int, float)) for x in [price, prev_close]) and prev_close > 0 else info.get('regularMarketChangePercent')
+            if all(isinstance(x, (int, float)) for x in [price, change, change_pct]):
+                st.metric(label="現在株価", value=f"{price:,.0f} 円", delta=f"前日比 {change:+.2f}円 ({change_pct:+.2%})")
             
         with col3:
-            st.write("") 
-            st.write("") 
+            st.write("")
+            st.write("")
             indicators = result.get('scoring_indicators', {})
-            peg_data = indicators.get('peg', {})
-            nc_data = indicators.get('net_cash_ratio', {})
-            cnper_data = indicators.get('cn_per', {})
-            roic_data = indicators.get('roic', {})
-
             def format_for_copy(data):
                 val = data.get('value')
                 return f"{val:.2f} ({data.get('evaluation', '')})" if val is not None else "N/A"
-            
-            change_pct_text = f"({change_pct_to_display:+.2%})" if isinstance(change_pct_to_display, (int, float)) else ""
+            change_pct_text = f"({change_pct:+.2%})" if isinstance(change_pct, (int, float)) else ""
             price_text = f"株価: {price:,.0f}円 (前日比 {change:+.2f}円, {change_pct_text})" if all(isinstance(x, (int, float)) for x in [price, change]) else ""
-
-            copy_text = (
-                f"■ {display_key}\n"
-                f"{price_text}\n"
-                f"総合スコア ({strategy_name}): {score_text}点 {stars_text}\n"
-                f"--------------------\n"
-                f"PEGレシオ (CAGR): {format_for_copy(peg_data)}\n"
-                f"ネットキャッシュ比率: {format_for_copy(nc_data)}\n"
-                f"キャッシュニュートラルPER: {format_for_copy(cnper_data)}\n"
-                f"ROIC: {format_for_copy(roic_data)}"
-            )
-            
+            copy_text = (f"■ {display_key}\n{price_text}\n総合スコア ({selected_strategy}): {score_text}点 {stars_text}\n"
+                         f"--------------------\nPEGレシオ (CAGR): {format_for_copy(indicators.get('peg',{}))}\n"
+                         f"ネットキャッシュ比率: {format_for_copy(indicators.get('net_cash_ratio',{}))}\n"
+                         f"キャッシュニュートラルPER: {format_for_copy(indicators.get('cn_per',{}))}\n"
+                         f"ROIC: {format_for_copy(indicators.get('roic',{}))}")
             create_copy_button(copy_text, "📋 結果をコピー", key=f"copy_{display_key.replace(' ','_')}")
         
-        st.markdown(f"#### 総合スコア ({strategy_name}): <span style='font-size: 28px; font-weight: bold; color: {score_color};'>{score_text}点</span> <span style='font-size: 32px;'>{stars_text}</span>", unsafe_allow_html=True)
+        st.markdown(f"#### 総合スコア ({selected_strategy}): <span style='font-size:28px; font-weight:bold; color:{score_color};'>{score_text}点</span> <span style='font-size:32px;'>{stars_text}</span>", unsafe_allow_html=True)
         
-        if result.get('warnings'):
-            st.info(f"注記: {'; '.join(list(set(result.get('warnings',[]))))}。詳細は各計算タブを確認してください。")
+        if result.get('warnings'): st.info(f"{'; '.join(list(set(result.get('warnings',[]))))}。")
 
         with st.container():
             cols = st.columns(4)
-            
-            def show_metric(column, title, subtitle, data, warnings):
-                with column:
+            def show_metric(col, title, subtitle, data, warnings):
+                with col:
                     note = ""
                     if title == "PEGレシオ (CAGR)" and any("PEG" in w for w in warnings): note = " *"
-                    if title == "ネットキャッシュ比率" and any(k in w for w in warnings for k in ["NC比率", "負債", "有価証券"]): note = " *"
-                    if title == "キャッシュニュートラルPER" and any(k in w for w in warnings for k in ["NC比率", "負債", "有価券"]): note = " *"
+                    if title in ["ネットキャッシュ比率", "キャッシュニュートラルPER"] and any(k in w for w in warnings for k in ["NC比率", "負債", "有価券"]): note = " *"
                     if title == "ROIC" and any("ROIC" in w for w in warnings): note = " *"
-                    
-                    val = data.get('value')
+                    val, score = data.get('value'), data.get('score', 0)
                     val_str = f"{val:.2f}" if val is not None else "N/A"
-                    score_val = data.get('score', 0)
-                    color = "#28a745" if score_val >= 70 else "#ffc107" if score_val >= 40 else "#dc3545"
-                    
-                    st.markdown(f"""
-                        <div style='text-align: center;'>
-                            <p style='font-size: 14px; color: #555; font-weight: bold; margin-bottom: 0;'>{title}{note}</p>
-                            <p style='font-size: 11px; color: #777; margin-bottom: 5px; margin-top: -2px;'>{subtitle}</p>
-                        </div>
-                    """, unsafe_allow_html=True)
-                    st.markdown(f"<p style='font-size: 28px; color: {color}; font-weight: bold; text-align: center; margin: 0;'>{val_str}</p>", unsafe_allow_html=True)
-                    st.markdown(f"<p style='text-align: center; font-weight: bold; font-size: 14px;'>スコア: <span style='color:{color};'>{score_val:.1f}点</span></p>", unsafe_allow_html=True)
-                    
-                    if val is None:
-                        st.markdown(f"<p style='text-align: center; font-size: 12px; color: red;'>({data.get('reason', '計算不能')})</p>", unsafe_allow_html=True)
-                    else:
-                        st.markdown(f"<p style='text-align: center; font-size: 12px; color: #777;'>{data.get('evaluation', '---')}</p>", unsafe_allow_html=True)
+                    color = "#28a745" if score >= 70 else "#ffc107" if score >= 40 else "#dc3545"
+                    st.markdown(f"<div style='text-align:center;'><p style='font-size:14px; color:#555; font-weight:bold; margin-bottom:0;'>{title}{note}</p><p style='font-size:11px; color:#777; margin-bottom:5px; margin-top:-2px;'>{subtitle}</p></div>", unsafe_allow_html=True)
+                    st.markdown(f"<p style='font-size:28px; color:{color}; font-weight:bold; text-align:center; margin:0;'>{val_str}</p>", unsafe_allow_html=True)
+                    st.markdown(f"<p style='text-align:center; font-weight:bold; font-size:14px;'>スコア: <span style='color:{color};'>{score:.1f}点</span></p>", unsafe_allow_html=True)
+                    if val is None: st.markdown(f"<p style='text-align:center; font-size:12px; color:red;'>({data.get('reason', '計算不能')})</p>", unsafe_allow_html=True)
+                    else: st.markdown(f"<p style='text-align:center; font-size:12px; color:#777;'>{data.get('evaluation', '---')}</p>", unsafe_allow_html=True)
             
             show_metric(cols[0], "PEGレシオ (CAGR)", "成長性を考慮した株価の割安性", indicators.get('peg', {}), result.get('warnings', []))
             show_metric(cols[1], "ネットキャッシュ比率", "現金を考慮した割安度", indicators.get('net_cash_ratio', {}), result.get('warnings', []))
@@ -1430,7 +1309,7 @@ if st.session_state.results:
                     ticker_code = result.get('ticker_code')
 
                     if df_s is None and df_g is None:
-                         st.warning(f"{ticker_code} の大株主・役員データ取得に失敗したか、情報がありませんでした。")
+                            st.warning(f"{ticker_code} の大株主・役員データ取得に失敗したか、情報がありませんでした。")
                     else:
                         if is_owner_executive:
                             st.success("✅ **注目:** 役員に大株主が含まれています！（役員リスト内で緑色の太字で表示）", icon="⭐")
@@ -1455,13 +1334,12 @@ if st.session_state.results:
                                     is_owner = row.get('大株主としての保有株式数', 0) > 0
                                     return ['color: #008000; font-weight: bold;'] * len(row) if is_owner else [''] * len(row)
                                 
-                                if '会計期' in df_g.columns and '会計期_dt' in df_g.columns: # Check if datetime conversion was successful
+                                g_display_df = df_g.copy()
+                                if '会計期_dt' in g_display_df.columns:
                                     latest_period_row = df_g.loc[df_g['会計期_dt'].idxmax()]
                                     latest_period = latest_period_row['会計期']
                                     st.info(f"最新の役員情報（{latest_period}時点）を表示しています。")
-                                    g_display_df = df_g.loc[df_g['会計期'] == latest_period].copy()
-                                else:
-                                    g_display_df = df_g.copy()
+                                    g_display_df = g_display_df.loc[g_display_df['会計期'] == latest_period]
 
                                 display_columns = ['役職', '氏名', '生年月日', '年齢', '役員としての所有株式数', '大株主としての保有株式数', '大株主としての保有割合 (%)']
                                 display_columns = [col for col in display_columns if col in g_display_df.columns]
@@ -1480,105 +1358,76 @@ if st.session_state.results:
                     st.subheader("PEGレシオ (CAGR) の計算過程")
                     peg_analysis = result.get('peg_analysis', {})
                     peg_data = peg_analysis.get('cagr_growth', {})
-                    
                     peg_warnings = peg_analysis.get('warnings')
-                    if peg_warnings:
-                        st.info(" ".join(list(set(peg_warnings))))
-                    
+                    if peg_warnings: st.info(" ".join(list(set(peg_warnings))))
                     st.markdown(f"**計算式:** `PER / (EPSのCAGR * 100)`")
                     per_val = indicators.get('variables', {}).get('PER (実績)')
                     if peg_data.get('value') is not None and isinstance(per_val, (int, float)):
                         st.text(f"PER {per_val:.2f} / (CAGR {peg_data.get('growth', 0)*100:.2f} %) = {peg_data.get('value'):.2f}")
-                        
                         st.markdown(f"**CAGR ({peg_data.get('years', 'N/A')}年) 計算:** `(最終EPS / 初期EPS) ** (1 / 年数) - 1`")
                         if all(isinstance(x, (int, float)) for x in [peg_data.get('end_eps'), peg_data.get('start_eps'), peg_data.get('years')]) and peg_data.get('years', 0) > 0:
                             st.text(f"({peg_data['end_eps']:.2f} / {peg_data['start_eps']:.2f}) ** (1 / {peg_data['years']}) - 1 = {peg_data.get('growth', 0):.4f}")
-                    else:
-                        st.error(f"計算不能。理由: {peg_data.get('reason', '不明')}")
-                    
+                    else: st.error(f"計算不能。理由: {peg_data.get('reason', '不明')}")
                     st.markdown("**計算に使用したEPSデータ (新しい順):**")
                     eps_points = peg_data.get('eps_points', [])
-                    if eps_points:
-                        st.text(str([f"{p:.2f}" if isinstance(p, (int, float)) else "N/A" for p in eps_points]))
-                    else:
-                        st.warning('EPSデータが不足しています。')
+                    if eps_points: st.text(str([f"{p:.2f}" if isinstance(p, (int, float)) else "N/A" for p in eps_points]))
+                    else: st.warning('EPSデータが不足しています。')
 
                 with tabs[3]: # ネットキャッシュ比率計算
                     st.subheader("清原式ネットキャッシュ比率の計算過程")
-                    nc_warnings = [w for w in result.get('warnings', []) if "NC比率" in w or "純有利子負債" in w or "有価証券" in w or "負債" in w]
-                    if nc_warnings:
-                        st.info(" ".join(list(set(nc_warnings))))
+                    nc_warnings = [w for w in result.get('warnings', []) if any(k in w for k in ["NC比率", "純有利子負債", "有価証券", "負債"])]
+                    if nc_warnings: st.info(" ".join(list(set(nc_warnings))))
                     st.markdown(f"**計算式:** `(流動資産 + 有価証券*0.7 - 負債合計) / 時価総額`")
                     formula = indicators.get('formulas', {}).get('ネットキャッシュ比率', indicators.get('net_cash_ratio', {}).get('reason'))
                     st.text(formula)
-                    
-                    st.json({
-                        "流動資産": f"{indicators.get('variables', {}).get('流動資産', 'N/A'):,.0f} 百万円" if isinstance(indicators.get('variables', {}).get('流動資産'), (int, float)) else "N/A",
-                        "有価証券": f"{indicators.get('variables', {}).get('有価証券', 'N/A'):,.0f} 百万円" if isinstance(indicators.get('variables', {}).get('有価証券'), (int, float)) else "N/A",
-                        "負債合計": f"{indicators.get('variables', {}).get('負債合計', 'N/A'):,.0f} 百万円" if isinstance(indicators.get('variables', {}).get('負債合計'), (int, float)) else "N/A",
-                        "時価総額": f"{indicators.get('variables', {}).get('時価総額', 0)/1e6:,.0f} 百万円" if isinstance(indicators.get('variables', {}).get('時価総額'), (int, float)) else "N/A"
-                    })
+                    st.json({k: f"{v:,.0f} 百万円" if isinstance(v, (int, float)) else "N/A" for k, v in {
+                        "流動資産": indicators.get('variables', {}).get('流動資産'), "有価証券": indicators.get('variables', {}).get('有価証券'),
+                        "負債合計": indicators.get('variables', {}).get('負債合計'),
+                        "時価総額": indicators.get('variables', {}).get('時価総額', 0)/1e6 if isinstance(indicators.get('variables', {}).get('時価総額'), (int, float)) else None
+                    }.items()})
                 
                 with tabs[4]: # キャッシュニュートラルPER計算
                     st.subheader("キャッシュニュートラルPERの計算過程")
                     st.markdown(f"**計算式:** `実績PER * (1 - ネットキャッシュ比率)`")
                     formula = indicators.get('formulas', {}).get('キャッシュニュートラルPER', indicators.get('cn_per', {}).get('reason'))
                     st.text(formula)
-                    
                     per_val = indicators.get('variables', {}).get('PER (実績)')
                     nc_ratio_val = indicators.get('net_cash_ratio', {}).get('value')
-                    
                     st.json({
-                        "実績PER": f"{per_val:.2f} 倍" if isinstance(per_val, (int, float)) else f"N/A ({'データなし'})",
+                        "実績PER": f"{per_val:.2f} 倍" if isinstance(per_val, (int, float)) else "N/A",
                         "ネットキャッシュ比率": f"{nc_ratio_val:.2f}" if isinstance(nc_ratio_val, (int, float)) else f"N/A ({indicators.get('net_cash_ratio', {}).get('reason')})"
                     })
 
                 with tabs[5]: # ROIC計算
                     st.subheader("ROICの計算過程")
-                    roic_warnings = [w for w in result.get('warnings', []) if "ROIC" in w]
-                    if roic_warnings:
-                        st.info(" ".join(list(set(roic_warnings))))
+                    if roic_warnings := [w for w in result.get('warnings', []) if "ROIC" in w]: st.info(" ".join(list(set(roic_warnings))))
                     st.markdown(f"**計算式:** `NOPAT (税引後営業利益) / 投下資本 (純資産 + 有利子負債)`")
                     formula = indicators.get('formulas', {}).get('ROIC', indicators.get('roic', {}).get('reason'))
                     st.text(formula)
-                    
-                    def format_value(value, is_currency=True, is_percent=False):
-                        if isinstance(value, (int, float)):
-                            if is_percent: return f"{value:.2%}"
-                            return f"{value:,.0f} 百万円" if is_currency else f"{value}"
+                    def format_value(v, is_curr=True, is_pct=False):
+                        if isinstance(v, (int, float)): return f"{v:.2%}" if is_pct else f"{v:,.0f} 百万円" if is_curr else f"{v}"
                         return "N/A"
-                    
-                    op_income_val = indicators.get('variables', {}).get(f"NOPAT計算用利益 ({indicators.get('roic_source_key', '')})")
-                    tax_rate_val = indicators.get('variables', {}).get('税率')
-                    net_assets_val = indicators.get('variables', {}).get('純資産')
-                    debt_val = indicators.get('variables', {}).get('有利子負債')
-                    net_debt_val = indicators.get('variables', {}).get('純有利子負債')
-
                     roic_vars = {
-                        "NOPAT計算用利益": format_value(op_income_val),
-                        "税率": format_value(tax_rate_val, is_percent=True),
-                        "純資産": format_value(net_assets_val),
+                        "NOPAT計算用利益": format_value(indicators.get('variables', {}).get(f"NOPAT計算用利益 ({indicators.get('roic_source_key', '')})")),
+                        "税率": format_value(indicators.get('variables', {}).get('税率'), is_pct=True),
+                        "純資産": format_value(indicators.get('variables', {}).get('純資産')),
                     }
-                    if debt_val is not None:
-                        roic_vars["有利子負債"] = format_value(debt_val)
-                    else:
-                        roic_vars["純有利子負債(代用)"] = format_value(net_debt_val)
+                    debt_val = indicators.get('variables', {}).get('有利子負債')
+                    if debt_val is not None: roic_vars["有利子負債"] = format_value(debt_val)
+                    else: roic_vars["純有利子負債(代用)"] = format_value(indicators.get('variables', {}).get('純有利子負債'))
                     st.json(roic_vars)
                 
                 with tabs[6]: # WACC計算
                     st.subheader("WACC (加重平均資本コスト) の計算過程")
-                    wacc_warnings = [w for w in result.get('warnings', []) if "β値" in w]
-                    if wacc_warnings:
-                        st.info(" ".join(list(set(wacc_warnings))))
+                    if wacc_warnings := [w for w in result.get('warnings', []) if "β値" in w]: st.info(" ".join(list(set(wacc_warnings))))
                     st.markdown(f"**計算式:** `株主資本コスト * 自己資本比率 + 負債コスト * (1 - 税率) * 負債比率`")
                     formula = indicators.get('formulas', {}).get('WACC', indicators.get('wacc', {}).get('reason'))
                     st.text(formula)
-                    
                     st.json({
-                        "WACC計算結果": format_value(indicators.get('wacc', {}).get('value'), is_percent=True),
-                        "株主資本コスト (Ke)": format_value(indicators.get('variables', {}).get('株主資本コスト'), is_percent=True),
-                        "負債コスト (Kd)": format_value(indicators.get('variables', {}).get('負債コスト'), is_percent=True),
-                        "税率": format_value(indicators.get('variables', {}).get('税率'), is_percent=True),
+                        "WACC計算結果": format_value(indicators.get('wacc', {}).get('value'), is_pct=True),
+                        "株主資本コスト (Ke)": format_value(indicators.get('variables', {}).get('株主資本コスト'), is_pct=True),
+                        "負債コスト (Kd)": format_value(indicators.get('variables', {}).get('負債コスト'), is_pct=True),
+                        "税率": format_value(indicators.get('variables', {}).get('税率'), is_pct=True),
                         "ベータ値": f"{indicators.get('variables', {}).get('ベータ値'):.2f}" if isinstance(indicators.get('variables', {}).get('ベータ値'), (int,float)) else "N/A",
                         "リスクフリーレート": f"{st.session_state.rf_rate:.2%}",
                         "マーケットリスクプレミアム": f"{mrp:.2%}"
@@ -1586,37 +1435,30 @@ if st.session_state.results:
                 
                 with tabs[7]: # PEGレシオコメント
                     st.subheader("PEGレシオに基づく投資家コメント (リンチ / クレイマー)")
-                    peg_data = indicators.get('peg', {})
-                    commentary = get_peg_investor_commentary(peg_data.get('value'))
+                    commentary = get_peg_investor_commentary(indicators.get('peg', {}).get('value'))
                     st.markdown(commentary, unsafe_allow_html=True)
                 
                 with tabs[8]: # 専門家コメント
                     st.subheader("専門家コメント")
-                    nc_ratio = indicators.get('net_cash_ratio', {}).get('value')
-                    cn_per = indicators.get('cn_per', {}).get('value')
-                    net_income = indicators.get('variables', {}).get('当期純利益')
-                    commentary = get_kiyohara_commentary(nc_ratio, cn_per, net_income)
+                    commentary = get_kiyohara_commentary(indicators.get('net_cash_ratio', {}).get('value'), indicators.get('cn_per', {}).get('value'), indicators.get('variables', {}).get('当期純利益'))
                     st.markdown(commentary, unsafe_allow_html=True)
 
                 with tabs[9]: # 財務諸表(バフェットコード)
                     st.subheader("財務諸表 (バフェットコード)")
                     bc_data = result.get('buffett_code_data', {})
-                    pl_data = bc_data.get('損益計算書', {})
-                    bs_data = bc_data.get('貸借対照表', {})
+                    pl_data, bs_data = bc_data.get('損益計算書', {}), bc_data.get('貸借対照表', {})
                     if pl_data or bs_data:
                         all_items = set()
-                        for period_data in pl_data.values(): all_items.update(period_data.keys())
-                        for period_data in bs_data.values(): all_items.update(period_data.keys())
+                        if pl_data: all_items.update(list(pl_data.values())[0].keys())
+                        if bs_data: all_items.update(list(bs_data.values())[0].keys())
                         periods = sorted(list(set(pl_data.keys()) | set(bs_data.keys())), reverse=True)
                         display_df = pd.DataFrame(index=sorted(list(all_items)), columns=periods)
                         for period in periods:
                             for item in display_df.index:
-                                val_pl = pl_data.get(period, {}).get(item, {}).get('display')
-                                val_bs = bs_data.get(period, {}).get(item, {}).get('display')
-                                display_df.loc[item, period] = val_pl or val_bs or "-"
+                                val = (pl_data.get(period, {}).get(item, {}) or bs_data.get(period, {}).get(item, {})).get('display')
+                                display_df.loc[item, period] = val or "-"
                         st.dataframe(display_df)
-                    else:
-                        st.warning("財務諸表データを取得できませんでした。")
+                    else: st.warning("財務諸表データを取得できませんでした。")
                 
                 with tabs[10]: # ヤフーファイナンス財務
                     st.subheader("ヤフーファイナンス財務データ")
@@ -1626,13 +1468,12 @@ if st.session_state.results:
                             if not df.empty:
                                 st.markdown(f"**{title}** (単位: 百万円)")
                                 st.dataframe(df.style.format("{:,.0f}", na_rep="-"))
-                            else:
-                                st.markdown(f"**{title}**: データなし")
-                    else:
-                        st.warning("Yahoo Financeから財務データを取得できませんでした。")
+                            else: st.markdown(f"**{title}**: データなし")
+                    else: st.warning("Yahoo Financeから財務データを取得できませんでした。")
 
+    # ### 修正箇所 ###
+    # 以下のランキングとグラフのセクションを for ループの外 (このインデント) に配置する
     st.markdown("---") 
-
     st.header("👑 時価総額ランキング")
 
     ranking_data = []
@@ -1641,32 +1482,19 @@ if st.session_state.results:
             market_cap = result['yf_info'].get('marketCap')
             sector = result.get('sector', '業種不明')
             if market_cap is not None:
-                ranking_data.append({
-                    "銘柄": display_key,
-                    "業種": sector,
-                    "時価総額": market_cap
-                })
+                ranking_data.append({ "銘柄": display_key, "業種": sector, "時価総額": market_cap })
 
     if ranking_data:
-        df_ranking = pd.DataFrame(ranking_data)
-        
-        df_ranking = df_ranking.sort_values(by="時価総額", ascending=False)
-        
+        df_ranking = pd.DataFrame(ranking_data).sort_values(by="時価総額", ascending=False)
         df_ranking.index = range(1, len(df_ranking) + 1)
         df_ranking.index.name = "順位"
-        
         def format_market_cap_display(cap):
-            if cap >= 1_000_000_000_000:
-                return f"{cap / 1_000_000_000_000:,.2f} 兆円"
-            else:
-                return f"{cap / 100_000_000:,.2f} 億円"
-
+            if cap >= 1_000_000_000_000: return f"{cap / 1_000_000_000_000:,.2f} 兆円"
+            return f"{cap / 100_000_000:,.2f} 億円"
         df_display = df_ranking.copy()
         df_display['時価総額'] = df_display['時価総額'].apply(format_market_cap_display)
-        
         st.dataframe(df_display, use_container_width=True)
-    else:
-        st.info("ランキングを表示するためのデータがありません。")
+    else: st.info("ランキングを表示するためのデータがありません。")
 
     st.markdown("---") 
 
@@ -1674,87 +1502,66 @@ if st.session_state.results:
     owner_executives = []
     for display_key, result in all_results.items():
         if 'error' in result: continue
-        
         df_g = result.get('governance_df')
         if df_g is not None and not df_g.empty and '大株主としての保有割合 (%)' in df_g.columns:
             owners = df_g[df_g['大株主としての保有割合 (%)'] > 0]
             if not owners.empty:
                 top_owner = owners.loc[owners['大株主としての保有割合 (%)'].idxmax()]
                 owner_executives.append({
-                    '銘柄コード': result.get('ticker_code'),
-                    '銘柄名': result.get('company_name'),
-                    '役職': top_owner['役職'],
-                    '氏名': top_owner['氏名'],
-                    '保有割合 (%)': top_owner['大株主としての保有割合 (%)']
+                    '銘柄コード': result.get('ticker_code'), '銘柄名': result.get('company_name'),
+                    '役職': top_owner['役職'], '氏名': top_owner['氏名'], '保有割合 (%)': top_owner['大株主としての保有割合 (%)']
                 })
 
     if owner_executives:
-        ranking_df = pd.DataFrame(owner_executives)
-        ranking_df = ranking_df.sort_values('保有割合 (%)', ascending=False).reset_index(drop=True)
-        ranking_df.index = ranking_df.index + 1
+        ranking_df = pd.DataFrame(owner_executives).sort_values('保有割合 (%)', ascending=False).reset_index(drop=True)
+        ranking_df.index += 1
         ranking_df.index.name = "順位"
-        st.dataframe(
-            ranking_df.style.format({'保有割合 (%)': '{:.2f}%'}),
-            use_container_width=True
-        )
-    else:
-        st.info("分析した銘柄に、大株主を兼ねる役員は見つかりませんでした。")
+        st.dataframe(ranking_df.style.format({'保有割合 (%)': '{:.2f}%'}), use_container_width=True)
+    else: st.info("分析した銘柄に、大株主を兼ねる役員は見つかりませんでした。")
 
     st.markdown("---") 
 
     st.header("時系列グラフ比較")
     metrics_to_plot = ['EPS (円)', 'EPS成長率 (対前年比) (%)', 'PER (倍)', 'PBR (倍)', 'ROE (%)', '自己資本比率 (%)', '年間1株配当 (円)', 'PEG (実績)']
-    selected_metric = st.selectbox("比較する指標を選択してください", metrics_to_plot)
+    selected_metric = st.selectbox("比較する指標を選択してください", metrics_to_plot, key="metric_selector")
 
     visible_stocks = []
     cols_check = st.columns(min(len(all_results.keys()), 4))
     for i, key in enumerate(all_results.keys()):
-        is_visible = cols_check[i % len(cols_check)].checkbox(key, value=True, key=f"check_{key}")
-        if is_visible:
+        if cols_check[i % len(cols_check)].checkbox(key, value=True, key=f"check_{key}"):
             visible_stocks.append(key)
     
     fig, ax = plt.subplots(figsize=(10, 6))
     color_list = plt.get_cmap('tab10').colors
-
     all_x_labels = set()
     for key in visible_stocks:
-        res = all_results.get(key, {})
-        df = res.get('timeseries_df')
-        if df is not None and not df.empty and '年度' in df.columns:
+        if (df := all_results.get(key, {}).get('timeseries_df')) is not None and not df.empty and '年度' in df.columns:
             all_x_labels.update(df['年度'].dropna().tolist())
     
     if all_x_labels and visible_stocks:
         sorted_x_labels = sorted(list(all_x_labels), key=lambda x: (x == '最新', x))
-
         for i, key in enumerate(visible_stocks):
-            res = all_results[key]
-            df = res.get('timeseries_df')
+            df = all_results[key].get('timeseries_df')
             if df is not None and not df.empty and '年度' in df.columns:
                 temp_df = df.set_index('年度')
-                if selected_metric not in temp_df.columns:
-                    temp_df[selected_metric] = np.nan
-                
+                if selected_metric not in temp_df.columns: temp_df[selected_metric] = np.nan
                 y_values = [temp_df.loc[label, selected_metric] if label in temp_df.index and pd.notna(temp_df.loc[label, selected_metric]) else np.nan for label in sorted_x_labels]
-                
-                y_series = pd.Series(y_values, index=range(len(sorted_x_labels)))
-                y_interpolated = y_series.interpolate(method='linear')
-                
-                line, = ax.plot(range(len(sorted_x_labels)), y_interpolated.values, marker='', linestyle='-', label=key, color=color_list[i % len(color_list)])
-                
-                for x_idx, y_val in enumerate(y_series):
+                y_series = pd.Series(y_values, index=range(len(sorted_x_labels))).interpolate(method='linear')
+                line, = ax.plot(range(len(sorted_x_labels)), y_series.values, marker='', linestyle='-', label=key, color=color_list[i % len(color_list)])
+                for x_idx, y_val in enumerate(pd.Series(y_values)):
                     if pd.notna(y_val):
                         ax.plot(x_idx, y_val, marker='o', color=line.get_color())
                         ax.annotate(f'{y_val:.2f}', (x_idx, y_val), textcoords="offset points", xytext=(0, 6), ha='center', fontsize=9)
 
         ymin, ymax = ax.get_ylim()
-        if selected_metric == 'PBR (倍)': ax.axhspan(0, 1, facecolor='limegreen', alpha=0.15)
-        elif selected_metric == 'PER (倍)': ax.axhspan(0, 10, facecolor='limegreen', alpha=0.15)
-        elif selected_metric == 'ROE (%)': ax.axhspan(10, max(ymax, 11), facecolor='limegreen', alpha=0.15)
-        elif selected_metric == 'PEG (実績)': ax.axhspan(0, 1, facecolor='limegreen', alpha=0.15)
-        elif selected_metric == '自己資本比率 (%)': ax.axhspan(60, max(ymax, 11), facecolor='limegreen', alpha=0.15)
-        elif selected_metric == 'EPS成長率 (対前年比) (%)': ax.axhspan(0, max(ymax, 1), facecolor='limegreen', alpha=0.15)
+        span_alpha = 0.15
+        if selected_metric == 'PBR (倍)': ax.axhspan(0, 1, facecolor='limegreen', alpha=span_alpha)
+        elif selected_metric == 'PER (倍)': ax.axhspan(0, 10, facecolor='limegreen', alpha=span_alpha)
+        elif selected_metric == 'ROE (%)': ax.axhspan(10, max(ymax, 11), facecolor='limegreen', alpha=span_alpha)
+        elif selected_metric == 'PEG (実績)': ax.axhspan(0, 1, facecolor='limegreen', alpha=span_alpha)
+        elif selected_metric == '自己資本比率 (%)': ax.axhspan(60, max(ymax, 11), facecolor='limegreen', alpha=span_alpha)
+        elif selected_metric == 'EPS成長率 (対前年比) (%)': ax.axhspan(0, max(ymax, 1), facecolor='limegreen', alpha=span_alpha)
         ax.set_ylim(ymin, ymax) 
-
         ax.set_title(f"{selected_metric} の時系列比較", fontsize=16)
         ax.set_ylabel(selected_metric)
         ax.grid(True, which='both', linestyle='--', linewidth=0.5)
@@ -1762,8 +1569,6 @@ if st.session_state.results:
         ax.set_xticks(range(len(sorted_x_labels)))
         ax.set_xticklabels(sorted_x_labels, rotation=30, ha='right')
         st.pyplot(fig)
-    else:
-        st.warning("グラフを描画できる銘柄が選択されていません。")
+    else: st.warning("グラフを描画できる銘柄が選択されていません。")
 
-else:
-    st.info("サイドバーから銘柄コードまたは会社名を入力して「分析実行」ボタンを押してください。")
+else: st.info("サイドバーから銘柄コードまたは会社名を入力して「分析実行」ボタンを押してください。")
