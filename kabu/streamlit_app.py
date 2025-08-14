@@ -1269,30 +1269,24 @@ if st.session_state.results:
         
         col1, col2, col3 = st.columns([0.55, 0.3, 0.15])
         
-        # --- ▼▼▼ ここから修正・機能追加箇所 ▼▼▼ ---
         with col1:
-            # 時価総額と銘柄コードを取得
             market_cap = result.get('yf_info', {}).get('marketCap')
             ticker_code = result.get('ticker_code')
 
-            # 1. 上場5年以内の企業にバッジを表示
             is_ipo_within_5_years = result.get('is_ipo_within_5_years', False)
             ipo_badge = ""
             if is_ipo_within_5_years:
                 ipo_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#dc3545; border-radius:12px; margin-left:10px;'>上場5年以内</span>"
 
-            # 2. 時価総額100億円以下の企業にバッジを表示
             small_cap_badge = ""
             if market_cap and market_cap <= 10_000_000_000:
                 small_cap_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#007bff; border-radius:12px; margin-left:10px;'>小型株</span>"
 
-            # 3. 株探へのリンクアイコンを追加
             kabutan_link = ""
             if ticker_code:
                 kabutan_url = f"https://kabutan.jp/stock/?code={ticker_code}"
                 kabutan_link = f"<a href='{kabutan_url}' target='_blank' title='株探で株価を確認' style='text-decoration:none; margin-left:10px; font-size:20px; vertical-align:middle;'>🔗</a>"
 
-            # 既存のバッジや情報を準備
             is_owner_exec = result.get('is_owner_executive', False)
             owner_badge = ""
             if is_owner_exec:
@@ -1301,9 +1295,7 @@ if st.session_state.results:
             sector = result.get('sector', '')
             sector_span = f"<span style='font-size:16px; color:grey; font-weight:normal; margin-left:10px;'>({sector})</span>" if sector and pd.notna(sector) else ""
             
-            # 表示順を調整してMarkdownを生成
             st.markdown(f"### {display_key} {kabutan_link} {ipo_badge} {small_cap_badge} {owner_badge} {sector_span}", unsafe_allow_html=True)
-        # --- ▲▲▲ ここまで修正・機能追加箇所 ▲▲▲ ---
 
         with col2:
             info = result.get('yf_info', {})
@@ -1319,14 +1311,63 @@ if st.session_state.results:
             def format_for_copy(data):
                 val = data.get('value')
                 return f"{val:.2f} ({data.get('evaluation', '')})" if val is not None else "N/A"
+            
+            # --- ▼▼▼ ここからコピーテキスト生成ロジックの修正 ▼▼▼ ---
+            info = result.get('yf_info', {})
+            price, change, prev_close = info.get('regularMarketPrice'), info.get('regularMarketChange'), info.get('regularMarketPreviousClose')
+            change_pct = (price - prev_close) / prev_close if all(isinstance(x, (int, float)) for x in [price, prev_close]) and prev_close > 0 else info.get('regularMarketChangePercent')
             change_pct_text = f"({change_pct:+.2%})" if isinstance(change_pct, (int, float)) else ""
             price_text = f"株価: {price:,.0f}円 (前日比 {change:+.2f}円, {change_pct_text})" if all(isinstance(x, (int, float)) for x in [price, change]) else ""
-            copy_text = (f"■ {display_key}\n{price_text}\n総合スコア ({selected_strategy}): {score_text}点 {stars_text}\n"
-                         f"--------------------\nPEGレシオ (CAGR): {format_for_copy(indicators.get('peg',{}))}\n"
-                         f"ネットキャッシュ比率: {format_for_copy(indicators.get('net_cash_ratio',{}))}\n"
-                         f"キャッシュニュートラルPER: {format_for_copy(indicators.get('cn_per',{}))}\n"
-                         f"ROIC: {format_for_copy(indicators.get('roic',{}))}")
+
+            # 時価総額
+            market_cap = info.get('marketCap')
+            market_cap_text = "N/A"
+            if market_cap is not None:
+                if market_cap >= 1_000_000_000_000:
+                    market_cap_text = f"{market_cap / 1_000_000_000_000:,.2f} 兆円"
+                else:
+                    market_cap_text = f"{market_cap / 100_000_000:,.2f} 億円"
+            
+            # 特徴タグ
+            tags = []
+            if result.get('is_ipo_within_5_years', False): tags.append("上場5年以内")
+            if market_cap and market_cap <= 10_000_000_000: tags.append("小型株")
+            if result.get('is_owner_executive', False): tags.append("大株主役員")
+            tags_text = f"[{' | '.join(tags)}]" if tags else ""
+
+            # オーナー経営者情報
+            owner_text = ""
+            if result.get('is_owner_executive', False):
+                df_g = result.get('governance_df')
+                if df_g is not None and not df_g.empty and '大株主としての保有割合 (%)' in df_g.columns:
+                    owners = df_g[df_g['大株主としての保有割合 (%)'] > 0]
+                    if not owners.empty:
+                        top_owner = owners.loc[owners['大株主としての保有割合 (%)'].idxmax()]
+                        owner_name = top_owner.get('氏名', '不明')
+                        owner_ratio = top_owner.get('大株主としての保有割合 (%)', 0.0)
+                        owner_text = f"筆頭オーナー: {owner_name} ({owner_ratio:.2f}%)"
+
+            # copy_text の生成
+            copy_text_lines = [
+                f"■ {display_key} {tags_text}",
+                f"時価総額: {market_cap_text}",
+            ]
+            if owner_text:
+                copy_text_lines.append(owner_text)
+            
+            copy_text_lines.extend([
+                price_text,
+                f"総合スコア ({selected_strategy}): {score_text}点 {stars_text}",
+                "--------------------",
+                f"PEGレシオ (CAGR): {format_for_copy(indicators.get('peg',{}))}",
+                f"ネットキャッシュ比率: {format_for_copy(indicators.get('net_cash_ratio',{}))}",
+                f"キャッシュニュートラルPER: {format_for_copy(indicators.get('cn_per',{}))}",
+                f"ROIC: {format_for_copy(indicators.get('roic',{}))}"
+            ])
+            copy_text = "\n".join(copy_text_lines)
+            
             create_copy_button(copy_text, "📋 結果をコピー", key=f"copy_{display_key.replace(' ','_')}")
+            # --- ▲▲▲ ここまでコピーテキスト生成ロジックの修正 ▲▲▲ ---
         
         st.markdown(f"#### 総合スコア ({selected_strategy}): <span style='font-size:28px; font-weight:bold; color:{score_color};'>{score_text}点</span> <span style='font-size:32px;'>{stars_text}</span>", unsafe_allow_html=True)
         
