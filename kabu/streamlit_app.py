@@ -1226,13 +1226,27 @@ if analyze_button:
             
             all_results = {}
             data_handler = st.session_state.data_handler
-            data_handler._reset_session()
             
             total_stocks = len(unique_target_stocks)
             
             for i, stock_info in enumerate(unique_target_stocks):
                 progress_text.text(f"分析中... ({i+1}/{total_stocks}件完了): {stock_info.get('name', '')} ({stock_info['code']})")
                 
+                # --- ▼▼▼ ここから修正箇所 ▼▼▼ ---
+                # 銘柄ごとにセッションをリセットし、アクセス元を分散させる
+                data_handler._reset_session()
+                if data_handler.session is None:
+                    logger.error(f"銘柄 {stock_info['code']} のセッション初期化に失敗。スキップします。")
+                    display_key = f"{stock_info.get('name', stock_info['code'])} ({stock_info['code']})"
+                    all_results[display_key] = {
+                        'error': 'データ取得セッションの初期化に失敗しました。サイトがメンテナンス中か、ネットワークに問題がある可能性があります。',
+                        'company_name': stock_info.get('name', stock_info['code']),
+                        'ticker_code': stock_info['code']
+                    }
+                    progress_bar.progress((i + 1) / total_stocks)
+                    continue # 次の銘柄の処理へ
+                # --- ▲▲▲ ここまで修正箇所 ▲▲▲ ---
+
                 code = stock_info['code']
                 result = data_handler.perform_full_analysis(code, options)
                 result['sector'] = stock_info.get('sector', '業種不明')
@@ -1255,6 +1269,8 @@ if st.session_state.results:
     sorted_results = sorted(all_results.items(), key=lambda item: item[1].get('strategy_scores', {}).get(selected_strategy, -1), reverse=True)
 
     for display_key, result in sorted_results:
+        ticker_code = result.get('ticker_code') # エラー時でもticker_codeを取得
+
         if 'error' in result:
             with st.expander(f"▼ {display_key} - 分析エラー", expanded=True):
                 st.error(f"分析中にエラーが発生しました。\n\n詳細: {result['error']}")
@@ -1269,41 +1285,28 @@ if st.session_state.results:
         
         col1, col2, col3 = st.columns([0.55, 0.3, 0.15])
         
-        # --- ▼▼▼ ここから修正・機能追加箇所 ▼▼▼ ---
         with col1:
-            # 時価総額と銘柄コードを取得
             market_cap = result.get('yf_info', {}).get('marketCap')
-            ticker_code = result.get('ticker_code')
 
-            # 1. 上場5年以内の企業にバッジを表示
             is_ipo_within_5_years = result.get('is_ipo_within_5_years', False)
-            ipo_badge = ""
-            if is_ipo_within_5_years:
-                ipo_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#dc3545; border-radius:12px; margin-left:10px;'>上場5年以内</span>"
+            ipo_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#dc3545; border-radius:12px; margin-left:10px;'>上場5年以内</span>" if is_ipo_within_5_years else ""
 
-            # 2. 時価総額100億円以下の企業にバッジを表示
             small_cap_badge = ""
             if market_cap and market_cap <= 10_000_000_000:
                 small_cap_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#007bff; border-radius:12px; margin-left:10px;'>小型株</span>"
 
-            # 3. 株探へのリンクアイコンを追加
             kabutan_link = ""
             if ticker_code:
                 kabutan_url = f"https://kabutan.jp/stock/?code={ticker_code}"
                 kabutan_link = f"<a href='{kabutan_url}' target='_blank' title='株探で株価を確認' style='text-decoration:none; margin-left:10px; font-size:20px; vertical-align:middle;'>🔗</a>"
 
-            # 既存のバッジや情報を準備
             is_owner_exec = result.get('is_owner_executive', False)
-            owner_badge = ""
-            if is_owner_exec:
-                owner_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#28a745; border-radius:12px; margin-left:10px;'>大株主役員</span>"
+            owner_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#28a745; border-radius:12px; margin-left:10px;'>大株主役員</span>" if is_owner_exec else ""
             
             sector = result.get('sector', '')
             sector_span = f"<span style='font-size:16px; color:grey; font-weight:normal; margin-left:10px;'>({sector})</span>" if sector and pd.notna(sector) else ""
             
-            # 表示順を調整してMarkdownを生成
             st.markdown(f"### {display_key} {kabutan_link} {ipo_badge} {small_cap_badge} {owner_badge} {sector_span}", unsafe_allow_html=True)
-        # --- ▲▲▲ ここまで修正・機能追加箇所 ▲▲▲ ---
 
         with col2:
             info = result.get('yf_info', {})
@@ -1322,8 +1325,6 @@ if st.session_state.results:
             change_pct_text = f"({change_pct:+.2%})" if isinstance(change_pct, (int, float)) else ""
             price_text = f"株価: {price:,.0f}円 (前日比 {change:+.2f}円, {change_pct_text})" if all(isinstance(x, (int, float)) for x in [price, change]) else ""
             
-            # --- ▼▼▼ ここから修正箇所 ▼▼▼ ---
-            # 時価総額のテキストを生成
             market_cap_val = result.get('yf_info', {}).get('marketCap')
             market_cap_text = ""
             if market_cap_val:
@@ -1332,7 +1333,6 @@ if st.session_state.results:
                 else:
                     market_cap_text = f"時価総額: {market_cap_val / 100_000_000:,.2f} 億円"
 
-            # 特徴のテキストを生成
             features = []
             if market_cap_val and market_cap_val <= 10_000_000_000:
                 features.append("小型株")
@@ -1342,7 +1342,6 @@ if st.session_state.results:
                 features.append("上場5年以内")
             features_text = f"特徴: {', '.join(features)}" if features else ""
 
-            # オーナー経営者情報のテキストを生成
             owner_info_text = ""
             df_g = result.get('governance_df')
             if result.get('is_owner_executive', False) and df_g is not None and not df_g.empty and '大株主としての保有割合 (%)' in df_g.columns:
@@ -1353,7 +1352,6 @@ if st.session_state.results:
                     owner_ratio = top_owner.get('大株主としての保有割合 (%)', 0)
                     owner_info_text = f"筆頭オーナー経営者: {owner_name} ({owner_ratio:.2f}%)"
 
-            # コピー用テキストを組み立て
             copy_text = f"■ {display_key}\n{price_text}"
             if market_cap_text: copy_text += f"\n{market_cap_text}"
             if features_text: copy_text += f"\n{features_text}"
@@ -1364,7 +1362,6 @@ if st.session_state.results:
                           f"ネットキャッシュ比率: {format_for_copy(indicators.get('net_cash_ratio',{}))}\n"
                           f"キャッシュニュートラルPER: {format_for_copy(indicators.get('cn_per',{}))}\n"
                           f"ROIC: {format_for_copy(indicators.get('roic',{}))}")
-            # --- ▲▲▲ ここまで修正箇所 ▲▲▲ ---
             create_copy_button(copy_text, "📋 結果をコピー", key=f"copy_{display_key.replace(' ','_')}")
         
         st.markdown(f"#### 総合スコア ({selected_strategy}): <span style='font-size:28px; font-weight:bold; color:{score_color};'>{score_text}点</span> <span style='font-size:32px;'>{stars_text}</span>", unsafe_allow_html=True)
@@ -1415,11 +1412,10 @@ if st.session_state.results:
                         st.warning("時系列データを取得できませんでした。")
                 
                 with tabs[1]:
-                    st.subheader(f"大株主・役員情報 ({result.get('ticker_code')})")
+                    st.subheader(f"大株主・役員情報 ({ticker_code})")
                     df_s = result.get('shareholders_df')
                     df_g = result.get('governance_df')
                     is_owner_executive = result.get('is_owner_executive', False)
-                    ticker_code = result.get('ticker_code')
 
                     if df_s is None and df_g is None:
                             st.warning(f"{ticker_code} の大株主・役員データ取得に失敗したか、情報がありませんでした。")
@@ -1646,12 +1642,14 @@ if st.session_state.results:
     color_list = plt.get_cmap('tab10').colors
     all_x_labels = set()
     for key in visible_stocks:
-        if (df := all_results.get(key, {}).get('timeseries_df')) is not None and not df.empty and '年度' in df.columns:
-            all_x_labels.update(df['年度'].dropna().tolist())
+        if 'error' not in all_results.get(key, {}):
+            if (df := all_results.get(key, {}).get('timeseries_df')) is not None and not df.empty and '年度' in df.columns:
+                all_x_labels.update(df['年度'].dropna().tolist())
     
     if all_x_labels and visible_stocks:
         sorted_x_labels = sorted(list(all_x_labels), key=lambda x: (x == '最新', x))
         for i, key in enumerate(visible_stocks):
+            if 'error' in all_results.get(key, {}): continue
             df = all_results[key].get('timeseries_df')
             if df is not None and not df.empty and '年度' in df.columns:
                 temp_df = df.set_index('年度')
