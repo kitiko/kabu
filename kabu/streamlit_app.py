@@ -199,7 +199,6 @@ JPX_STOCK_LIST_PATH = os.path.join(BASE_DIR, "jpx_list.xls")
 def load_jpx_stock_list():
     try:
         df = pd.read_excel(JPX_STOCK_LIST_PATH, header=None, engine='xlrd')
-        # ★修正: 業種コードのカラム(4)も読み込む
         if df.shape[1] < 6:
             st.error(f"銘柄リストファイル({JPX_STOCK_LIST_PATH})の形式が想定と異なります。")
             return pd.DataFrame(columns=['code', 'name', 'market', 'sector_code', 'sector', 'normalized_name'])
@@ -207,7 +206,6 @@ def load_jpx_stock_list():
         df.columns = ['code', 'name', 'market', 'sector_code', 'sector']
         df.dropna(subset=['code', 'name', 'sector_code'], inplace=True)
 
-        # 銘柄コードを文字列として確実に処理する
         def clean_code(x):
             if pd.isna(x):
                 return ""
@@ -216,7 +214,6 @@ def load_jpx_stock_list():
             return str(x).strip().upper()
 
         df['code'] = df['code'].apply(clean_code)
-        # 業種コードを数値型に変換
         df['sector_code'] = pd.to_numeric(df['sector_code'], errors='coerce').astype('Int64')
         df = df[df['code'].str.fullmatch(r'(\d{4}|\d{3}[A-Z])', na=False)]
         df['normalized_name'] = df['name'].apply(normalize_text)
@@ -251,7 +248,6 @@ STRATEGY_WEIGHTS = {
     "🚀 グロース重視（成長重視）": {"safety": 0.10, "value": 0.20, "quality": 0.35, "growth": 0.35},
     "🛡️ 健全性重視（安全第一）": {"safety": 0.50, "value": 0.25, "quality": 0.15, "growth": 0.10}
 }
-# ★追加: シクリカル銘柄の業種コードを定義
 CYCLICAL_SECTOR_CODES = {
     1050, 3100, 3150, 3200, 3300, 3350, 3400, 3450, 3500, 3550, 3600, 3650, 3700, 3750, 5050, 5100, 5150, 5200, 6050
 }
@@ -321,8 +317,12 @@ class IntegratedDataHandler:
         'Cash Flow From Continuing Financing Activities': '財務キャッシュフロー', 'Net Change In Cash': '現金の増減額', 'Free Cash Flow': 'フリーキャッシュフロー',
     }
 
-    # ▼▼▼▼▼【改善箇所】▼▼▼▼▼
+    # ▼▼▼▼▼【**修正箇所**】▼▼▼▼▼
     def get_html_soup(self, url: str, retries: int = 3) -> BeautifulSoup | None:
+        """
+        指定されたURLからHTMLを取得し、BeautifulSoupオブジェクトを返す。
+        動的なヘッダー生成と堅牢なリトライ処理を実装。
+        """
         for attempt in range(retries):
             if self.session is None:
                 logger.warning("セッションが無効です。新しいセッションを初期化します。")
@@ -333,7 +333,7 @@ class IntegratedDataHandler:
             
             logger.info(f"URLにアクセス試行 ({attempt + 1}/{retries}): {url}")
             try:
-                # 汎用的なヘッダーを定義
+                # 汎用的な基本ヘッダーを定義
                 headers = {
                     'Referer': 'https://www.buffett-code.com/',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
@@ -346,11 +346,11 @@ class IntegratedDataHandler:
                     'Upgrade-Insecure-Requests': '1',
                 }
                 
-                #【修正点】ブラウザがChromeの場合のみ、Sec-Ch-Uaヘッダーを追加
+                # **【重要】** 偽装ブラウザがChrome系の場合のみ、Sec-Ch-Uaヘッダーを安全に追加
                 impersonate_str = self.session.impersonate
                 if "chrome" in impersonate_str:
                     try:
-                        # 'chrome124' や 'chrome120_android' からバージョン番号を安全に抽出
+                        # 'chrome124' や 'chrome120_android' からバージョン番号を正規表現で安全に抽出
                         version_match = re.search(r'chrome(\d+)', impersonate_str)
                         if version_match:
                             version = version_match.group(1)
@@ -362,12 +362,13 @@ class IntegratedDataHandler:
                     except Exception as e:
                         logger.warning(f"Chromeヘッダーの解析中にエラーが発生しました ({impersonate_str}): {e}")
 
+                # リトライごとに待機時間を延長
                 wait_time = random.uniform(4.0, 7.0) * (attempt + 1)
                 logger.info(f"{wait_time:.2f}秒待機します...")
                 time.sleep(wait_time)
                 
                 response = self.session.get(url, timeout=30, headers=headers)
-                response.raise_for_status()
+                response.raise_for_status() # 4xx, 5xxエラーを検知
                 
                 logger.info(f"URLへのアクセス成功 (ステータスコード: {response.status_code}): {url}")
                 return BeautifulSoup(response.content, 'html.parser')
@@ -378,10 +379,10 @@ class IntegratedDataHandler:
                     logger.warning("アクセスがブロックされた可能性があるため、セッションをリセットして再試行します。")
                     self._reset_session()
                 elif e.response.status_code >= 500:
-                    time.sleep(10)
+                    time.sleep(10) # サーバーエラーの場合は長めに待つ
             except Exception as e:
                 logger.error(f"予期せぬエラー発生 (試行 {attempt + 1}/{retries}): {url}, エラー: {e}", exc_info=True)
-                self._reset_session()
+                self._reset_session() # 予期せぬエラーでもセッションをリセット
         
         st.error(f"バフェットコードへのアクセスに失敗しました ({retries}回試行後)。サイトがメンテナンス中か、IPがブロックされた可能性があります。")
         return None
@@ -1156,7 +1157,6 @@ def run_stock_analysis(ticker_input_str: str, options: dict):
         code = stock_info['code']
         result = data_handler.perform_full_analysis(code, options)
         result['sector'] = stock_info.get('sector', '業種不明')
-        # ★追加: 業種コードも結果に含める
         result['sector_code'] = stock_info.get('sector_code')
         display_key = f"{result.get('company_name', code)} ({code})"
         all_results[display_key] = result
@@ -1237,7 +1237,6 @@ if 'rf_rate_manual' not in st.session_state:
     st.session_state.rf_rate_manual = st.session_state.rf_rate
 if 'rf_rate_fetched' not in st.session_state:
     st.session_state.rf_rate_fetched = False
-# ★修正1: テキストエリアのデフォルト値を空にする
 if 'ticker_input_value' not in st.session_state:
     st.session_state.ticker_input_value = ""
 
@@ -1310,7 +1309,6 @@ if ai_search_button:
             candidate_list_str = None
             status_message = f"企業「{target_name} ({target_code})」の類似銘柄をAIが検索中..."
 
-            # 事前フィルタリング
             if target_sector and pd.notna(target_sector) and not search_handler.stock_list_df.empty:
                 status_message = f"「{target_sector}」業種内で類似銘柄をAIが検索中..."
                 candidate_df = search_handler.stock_list_df[
@@ -1318,7 +1316,6 @@ if ai_search_button:
                     (search_handler.stock_list_df['code'] != target_code)
                 ]
                 if not candidate_df.empty:
-                    # プロンプト用に候補リストを作成（最大100件）
                     candidate_list = [f"- {row['name']} ({row['code']})" for index, row in candidate_df.head(100).iterrows()]
                     candidate_list_str = "\n".join(candidate_list)
             
@@ -1337,7 +1334,6 @@ if ai_search_button:
                     response = model.generate_content(prompt)
 
                     st.write("⚙️ 応答データを整形しています...")
-                    # ★修正: 数字、カンマ、大文字アルファベット以外を削除
                     cleaned_text = re.sub(r'[^0-9,A-Z]', '', response.text.upper())
                     similar_tickers = ",".join(filter(None, cleaned_text.split(',')))
                     time.sleep(1)
@@ -1353,7 +1349,6 @@ if ai_search_button:
                     st.error(f"AI検索中にエラーが発生しました: {e}")
 
             if similar_tickers:
-                # ★修正2: 検索元の銘柄をリストの先頭に追加
                 final_ticker_list = f"{target_code},{similar_tickers}"
                 st.session_state.ticker_input_value = final_ticker_list
                 st.success(f"AIが抽出した銘柄リストで分析を開始します: {final_ticker_list}")
@@ -1400,7 +1395,6 @@ if st.session_state.results:
             if market_cap and market_cap <= 10_000_000_000:
                 small_cap_badge = f"<span style='display:inline-block; vertical-align:middle; padding:3px 8px; font-size:13px; font-weight:bold; color:white; background-color:#007bff; border-radius:12px; margin-left:10px;'>小型株</span>"
             
-            # ★追加: シクリカル銘柄バッジの生成
             cyclical_badge = ""
             sector_code = result.get('sector_code')
             if sector_code and sector_code in CYCLICAL_SECTOR_CODES:
@@ -1415,7 +1409,6 @@ if st.session_state.results:
             sector = result.get('sector', '')
             sector_span = f"<span style='font-size:16px; color:grey; font-weight:normal; margin-left:10px;'>({sector})</span>" if sector and pd.notna(sector) else ""
             
-            # ★修正: バッジ表示を追加
             st.markdown(f"### {display_key} {kabutan_link} {ipo_badge} {small_cap_badge} {owner_badge} {cyclical_badge} {sector_span}", unsafe_allow_html=True)
         with col2:
             info = result.get('yf_info', {})
