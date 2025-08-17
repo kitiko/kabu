@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 # APIキーを直接コードに設定します
 try:
-    api_key = "AIzaSyCfRAXzND5SX5gECeq8HGX0_5mSIcFgJMY"
+    # ユーザーの便宜のため、サンプルキーを記載していますが、実際にはご自身のキーに置き換えてください。
+    api_key = "AIzaSyCfRAXzND5SX5gECeq8HGX0_5mSIcFgJMY" # 注: これはダミーキーです。
     genai.configure(api_key=api_key)
     logger.info("Gemini APIキーをハードコードで設定しました。")
 except Exception as e:
@@ -320,6 +321,7 @@ class IntegratedDataHandler:
         'Cash Flow From Continuing Financing Activities': '財務キャッシュフロー', 'Net Change In Cash': '現金の増減額', 'Free Cash Flow': 'フリーキャッシュフロー',
     }
 
+    # ▼▼▼▼▼【改善箇所】▼▼▼▼▼
     def get_html_soup(self, url: str, retries: int = 3) -> BeautifulSoup | None:
         for attempt in range(retries):
             if self.session is None:
@@ -328,29 +330,48 @@ class IntegratedDataHandler:
                 if self.session is None:
                     st.error("セッションの再初期化に失敗しました。処理を中断します。")
                     return None
+            
             logger.info(f"URLにアクセス試行 ({attempt + 1}/{retries}): {url}")
             try:
+                # 汎用的なヘッダーを定義
                 headers = {
                     'Referer': 'https://www.buffett-code.com/',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
                     'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
                     'Accept-Encoding': 'gzip, deflate, br',
-                    'Sec-Ch-Ua': f'"Chromium";v="{self.session.impersonate.split("chrome")[1]}", "Not/A)Brand";v="99"',
-                    'Sec-Ch-Ua-Mobile': '?0',
-                    'Sec-Ch-Ua-Platform': '"Windows"',
                     'Sec-Fetch-Dest': 'document',
                     'Sec-Fetch-Mode': 'navigate',
                     'Sec-Fetch-Site': 'same-origin',
                     'Sec-Fetch-User': '?1',
                     'Upgrade-Insecure-Requests': '1',
                 }
+                
+                #【修正点】ブラウザがChromeの場合のみ、Sec-Ch-Uaヘッダーを追加
+                impersonate_str = self.session.impersonate
+                if "chrome" in impersonate_str:
+                    try:
+                        # 'chrome124' や 'chrome120_android' からバージョン番号を安全に抽出
+                        version_match = re.search(r'chrome(\d+)', impersonate_str)
+                        if version_match:
+                            version = version_match.group(1)
+                            is_mobile = "android" in impersonate_str
+                            
+                            headers['Sec-Ch-Ua'] = f'"Chromium";v="{version}", "Not/A)Brand";v="99"'
+                            headers['Sec-Ch-Ua-Mobile'] = '?1' if is_mobile else '?0'
+                            headers['Sec-Ch-Ua-Platform'] = '"Android"' if is_mobile else '"Windows"'
+                    except Exception as e:
+                        logger.warning(f"Chromeヘッダーの解析中にエラーが発生しました ({impersonate_str}): {e}")
+
                 wait_time = random.uniform(4.0, 7.0) * (attempt + 1)
                 logger.info(f"{wait_time:.2f}秒待機します...")
                 time.sleep(wait_time)
+                
                 response = self.session.get(url, timeout=30, headers=headers)
                 response.raise_for_status()
+                
                 logger.info(f"URLへのアクセス成功 (ステータスコード: {response.status_code}): {url}")
                 return BeautifulSoup(response.content, 'html.parser')
+                
             except HTTPError as e:
                 logger.error(f"HTTPエラー発生 (試行 {attempt + 1}/{retries}): {url}, ステータス: {e.response.status_code}, エラー: {e}", exc_info=False)
                 if e.response.status_code in [403, 405, 429]:
@@ -361,8 +382,10 @@ class IntegratedDataHandler:
             except Exception as e:
                 logger.error(f"予期せぬエラー発生 (試行 {attempt + 1}/{retries}): {url}, エラー: {e}", exc_info=True)
                 self._reset_session()
+        
         st.error(f"バフェットコードへのアクセスに失敗しました ({retries}回試行後)。サイトがメンテナンス中か、IPがブロックされた可能性があります。")
         return None
+    # ▲▲▲▲▲【ここまで】▲▲▲▲▲
 
     def get_risk_free_rate(self) -> float | None:
         url = "https://jp.investing.com/rates-bonds/japan-10-year-bond-yield"
