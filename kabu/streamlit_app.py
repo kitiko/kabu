@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 # 1.1. Google Gemini APIの設定
 # ==============================================================================
-# APIキーを直接コードに設定します
+# 【重要】ご自身の有効なGoogle Gemini APIキーに置き換えてください。
+# 現在のキーはダミーであり、このままではAI検索機能は動作しません。
 try:
-    # ユーザーの便宜のため、サンプルキーを記載していますが、実際にはご自身のキーに置き換えてください。
-    api_key = "AIzaSyCfRAXzND5SX5gECeq8HGX0_5mSIcFgJMY" # 注: これはダミーキーです。
+    api_key = "AIzaSyCfRAXzND5SX5gECeq8HGX0_5mSIcFgJMY" # ← ご自身の有効なAPIキーに変更してください
     genai.configure(api_key=api_key)
     logger.info("Gemini APIキーをハードコードで設定しました。")
 except Exception as e:
@@ -39,8 +39,7 @@ except Exception as e:
 
 
 def generate_prompt(ticker_code, candidate_list_str=None):
-    """AI類似銘柄検索用のプロンプトを生成する関数（改善版）"""
-
+    """AI類似銘柄検索用のプロンプトを生成する関数"""
     task_instruction = ""
     if candidate_list_str:
         task_instruction = f"""
@@ -268,11 +267,12 @@ class IntegratedDataHandler:
             selected_version = self.browser_rotator.get_random_browser()
             self.session.impersonate = selected_version
             logger.info(f"セッションの偽装バージョンとして '{selected_version}' を使用します。")
-            self.session.get("https://www.buffett-code.com/", timeout=20)
+            # ウォームアップアクセス
+            self.session.get("https://www.google.com/", timeout=20)
             logger.info("セッションのウォームアップに成功しました。")
         except Exception as e:
             logger.error(f"セッションの初期化（ウォームアップ）に失敗しました: {e}", exc_info=True)
-            st.error(f"バフェットコードへの初期アクセスに失敗しました。詳細: {e}")
+            st.toast(f"セッションの初期化に失敗: {e}", icon="🔥")
             self.session = None
 
     def get_ticker_info_from_query(self, query: str) -> dict | None:
@@ -317,12 +317,7 @@ class IntegratedDataHandler:
         'Cash Flow From Continuing Financing Activities': '財務キャッシュフロー', 'Net Change In Cash': '現金の増減額', 'Free Cash Flow': 'フリーキャッシュフロー',
     }
 
-    # ▼▼▼▼▼【**修正箇所**】▼▼▼▼▼
     def get_html_soup(self, url: str, retries: int = 3) -> BeautifulSoup | None:
-        """
-        指定されたURLからHTMLを取得し、BeautifulSoupオブジェクトを返す。
-        動的なヘッダー生成と堅牢なリトライ処理を実装。
-        """
         for attempt in range(retries):
             if self.session is None:
                 logger.warning("セッションが無効です。新しいセッションを初期化します。")
@@ -333,7 +328,6 @@ class IntegratedDataHandler:
             
             logger.info(f"URLにアクセス試行 ({attempt + 1}/{retries}): {url}")
             try:
-                # 汎用的な基本ヘッダーを定義
                 headers = {
                     'Referer': 'https://www.buffett-code.com/',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
@@ -346,29 +340,25 @@ class IntegratedDataHandler:
                     'Upgrade-Insecure-Requests': '1',
                 }
                 
-                # **【重要】** 偽装ブラウザがChrome系の場合のみ、Sec-Ch-Uaヘッダーを安全に追加
                 impersonate_str = self.session.impersonate
                 if "chrome" in impersonate_str:
                     try:
-                        # 'chrome124' や 'chrome120_android' からバージョン番号を正規表現で安全に抽出
                         version_match = re.search(r'chrome(\d+)', impersonate_str)
                         if version_match:
                             version = version_match.group(1)
                             is_mobile = "android" in impersonate_str
-                            
                             headers['Sec-Ch-Ua'] = f'"Chromium";v="{version}", "Not/A)Brand";v="99"'
                             headers['Sec-Ch-Ua-Mobile'] = '?1' if is_mobile else '?0'
                             headers['Sec-Ch-Ua-Platform'] = '"Android"' if is_mobile else '"Windows"'
                     except Exception as e:
                         logger.warning(f"Chromeヘッダーの解析中にエラーが発生しました ({impersonate_str}): {e}")
 
-                # リトライごとに待機時間を延長
                 wait_time = random.uniform(4.0, 7.0) * (attempt + 1)
                 logger.info(f"{wait_time:.2f}秒待機します...")
                 time.sleep(wait_time)
                 
                 response = self.session.get(url, timeout=30, headers=headers)
-                response.raise_for_status() # 4xx, 5xxエラーを検知
+                response.raise_for_status()
                 
                 logger.info(f"URLへのアクセス成功 (ステータスコード: {response.status_code}): {url}")
                 return BeautifulSoup(response.content, 'html.parser')
@@ -379,14 +369,13 @@ class IntegratedDataHandler:
                     logger.warning("アクセスがブロックされた可能性があるため、セッションをリセットして再試行します。")
                     self._reset_session()
                 elif e.response.status_code >= 500:
-                    time.sleep(10) # サーバーエラーの場合は長めに待つ
+                    time.sleep(10)
             except Exception as e:
                 logger.error(f"予期せぬエラー発生 (試行 {attempt + 1}/{retries}): {url}, エラー: {e}", exc_info=True)
-                self._reset_session() # 予期せぬエラーでもセッションをリセット
+                self._reset_session()
         
-        st.error(f"バフェットコードへのアクセスに失敗しました ({retries}回試行後)。サイトがメンテナンス中か、IPがブロックされた可能性があります。")
+        st.error(f"Webページへのアクセスに失敗しました ({retries}回試行後): {url}")
         return None
-    # ▲▲▲▲▲【ここまで】▲▲▲▲▲
 
     def get_risk_free_rate(self) -> float | None:
         url = "https://jp.investing.com/rates-bonds/japan-10-year-bond-yield"
@@ -1097,76 +1086,6 @@ class IntegratedDataHandler:
         return result
 
 # ==============================================================================
-# 分析実行関数
-# ==============================================================================
-def run_stock_analysis(ticker_input_str: str, options: dict):
-    """
-    指定された銘柄リスト文字列に基づいて分析を実行し、結果を返す。
-    """
-    input_queries = [q.strip() for q in ticker_input_str.split(',') if q.strip()]
-    if not input_queries:
-        st.error("銘柄コードまたは会社名を入力してください。")
-        return None
-
-    search_handler = st.session_state.data_handler
-    target_stocks = []
-    not_found_queries = []
-    with st.spinner("銘柄を検索しています..."):
-        for query in input_queries:
-            stock_info = search_handler.get_ticker_info_from_query(query)
-            if stock_info:
-                target_stocks.append(stock_info)
-            else:
-                not_found_queries.append(query)
-
-    unique_target_stocks = list({stock['code']: stock for stock in target_stocks}.values())
-
-    if not_found_queries:
-        st.warning(f"以下の銘柄は見つかりませんでした: {', '.join(not_found_queries)}")
-
-    if not unique_target_stocks:
-        st.error("分析対象の銘柄が見つかりませんでした。")
-        return None
-
-    st.success(f"分析対象: {', '.join([s['code'] for s in unique_target_stocks])}")
-    progress_bar = st.progress(0)
-    progress_text = st.empty()
-    all_results = {}
-    data_handler = st.session_state.data_handler
-    total_stocks = len(unique_target_stocks)
-
-    data_handler._reset_session()
-    for i, stock_info in enumerate(unique_target_stocks):
-        if i > 0 and (i % 4 == 0 or data_handler.session is None):
-            logger.info(f"定期的なセッションのリセットを実行 ({i}銘柄目)")
-            data_handler._reset_session()
-
-        progress_text.text(f"分析中... ({i+1}/{total_stocks}件完了): {stock_info.get('name', '')} ({stock_info['code']})")
-
-        if data_handler.session is None:
-            logger.error(f"銘柄 {stock_info['code']} のセッション初期化に失敗。スキップします。")
-            display_key = f"{stock_info.get('name', stock_info['code'])} ({stock_info['code']})"
-            all_results[display_key] = {
-                'error': 'データ取得セッションの初期化に失敗しました。サイトがメンテナンス中か、ネットワークに問題がある可能性があります。',
-                'company_name': stock_info.get('name', stock_info['code']),
-                'ticker_code': stock_info['code']
-            }
-            progress_bar.progress((i + 1) / total_stocks)
-            continue
-
-        code = stock_info['code']
-        result = data_handler.perform_full_analysis(code, options)
-        result['sector'] = stock_info.get('sector', '業種不明')
-        result['sector_code'] = stock_info.get('sector_code')
-        display_key = f"{result.get('company_name', code)} ({code})"
-        all_results[display_key] = result
-        progress_bar.progress((i + 1) / total_stocks)
-
-    progress_text.empty()
-    progress_bar.empty()
-    return all_results
-
-# ==============================================================================
 # GUI表示用ヘルパー関数
 # ==============================================================================
 def get_recommendation(score):
@@ -1240,11 +1159,9 @@ if 'rf_rate_fetched' not in st.session_state:
 if 'ticker_input_value' not in st.session_state:
     st.session_state.ticker_input_value = ""
 
-
 # --- サイドバーUI ---
 st.sidebar.title("分析設定")
 
-# --- シンプル検索セクション ---
 st.sidebar.subheader("銘柄検索（シンプル検索）")
 ticker_input = st.sidebar.text_area(
     "銘柄コード or 会社名 (カンマ区切り)",
@@ -1255,7 +1172,6 @@ analyze_button = st.sidebar.button("分析実行")
 
 st.sidebar.markdown("---")
 
-# --- AI類似銘柄検索セクション ---
 st.sidebar.subheader("AI類似銘柄検索")
 ai_search_query = st.sidebar.text_input(
     "対象企業 (コード or 会社名):",
@@ -1266,7 +1182,6 @@ ai_search_button = st.sidebar.button("類似銘柄検索")
 
 st.sidebar.markdown("---")
 
-# --- 詳細設定セクション ---
 st.sidebar.subheader("詳細設定")
 if not st.session_state.rf_rate_fetched:
     with st.spinner("最新のリスクフリーレートを取得中..."):
@@ -1290,14 +1205,14 @@ st.caption(f"最終更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 # --- メイン処理 ---
 options = {'risk_free_rate': st.session_state.rf_rate, 'mkt_risk_premium': mrp}
+data_handler = st.session_state.data_handler
 
-# AI類似銘柄検索ボタンが押された時の処理
+# ▼▼▼【修正箇所】AI類似銘柄検索ボタンの処理▼▼▼
 if ai_search_button:
     if not ai_search_query:
         st.sidebar.error("対象企業を入力してください。")
     else:
-        search_handler = st.session_state.data_handler
-        stock_info = search_handler.get_ticker_info_from_query(ai_search_query)
+        stock_info = data_handler.get_ticker_info_from_query(ai_search_query)
 
         if stock_info is None:
             st.sidebar.error(f"「{ai_search_query}」に一致する銘柄が見つかりませんでした。")
@@ -1309,11 +1224,11 @@ if ai_search_button:
             candidate_list_str = None
             status_message = f"企業「{target_name} ({target_code})」の類似銘柄をAIが検索中..."
 
-            if target_sector and pd.notna(target_sector) and not search_handler.stock_list_df.empty:
+            if target_sector and pd.notna(target_sector) and not data_handler.stock_list_df.empty:
                 status_message = f"「{target_sector}」業種内で類似銘柄をAIが検索中..."
-                candidate_df = search_handler.stock_list_df[
-                    (search_handler.stock_list_df['sector'] == target_sector) &
-                    (search_handler.stock_list_df['code'] != target_code)
+                candidate_df = data_handler.stock_list_df[
+                    (data_handler.stock_list_df['sector'] == target_sector) &
+                    (data_handler.stock_list_df['code'] != target_code)
                 ]
                 if not candidate_df.empty:
                     candidate_list = [f"- {row['name']} ({row['code']})" for index, row in candidate_df.head(100).iterrows()]
@@ -1322,48 +1237,122 @@ if ai_search_button:
             similar_tickers = ""
             with st.status(status_message, expanded=True) as status:
                 try:
-                    st.write("🧠 AIモデルを準備しています...")
+                    st.write("🧠 AIモデルに接続しています...")
                     model = genai.GenerativeModel("gemini-1.5-flash-latest")
-                    time.sleep(1)
-
-                    st.write(f"📝 {target_name} ({target_code})用の高度なプロンプトを生成しています...")
                     prompt = generate_prompt(target_code, candidate_list_str)
-                    time.sleep(1)
-
+                    
                     st.write("⏳ AIが類似銘柄を分析中です... (これには数十秒かかる場合があります)")
-                    response = model.generate_content(prompt)
+                    response = model.generate_content(prompt) # ここでAPI通信が発生
 
                     st.write("⚙️ 応答データを整形しています...")
                     cleaned_text = re.sub(r'[^0-9,A-Z]', '', response.text.upper())
                     similar_tickers = ",".join(filter(None, cleaned_text.split(',')))
+                    
+                    if not similar_tickers:
+                         raise ValueError("AIから有効な銘柄コードが返されませんでした。")
+
+                    status.update(label="✅ AI検索完了！", state="complete", expanded=False)
+                    
+                    # 分析処理へ
+                    final_ticker_list = f"{target_code},{similar_tickers}"
+                    st.session_state.ticker_input_value = final_ticker_list
+                    st.success(f"AIが抽出した銘柄リストで分析を開始します: {final_ticker_list}")
                     time.sleep(1)
 
-                    if similar_tickers:
-                        status.update(label="✅ AI検索完了！", state="complete", expanded=False)
-                    else:
-                        status.update(label="⚠️ AIが類似銘柄を見つけられませんでした。", state="error", expanded=True)
-                        st.warning("AIから類似銘柄を取得できませんでした。")
-
-                except Exception as e:
-                    status.update(label="❌ エラー発生", state="error", expanded=True)
-                    st.error(f"AI検索中にエラーが発生しました: {e}")
-
-            if similar_tickers:
-                final_ticker_list = f"{target_code},{similar_tickers}"
-                st.session_state.ticker_input_value = final_ticker_list
-                st.success(f"AIが抽出した銘柄リストで分析を開始します: {final_ticker_list}")
-                time.sleep(1)
-                results = run_stock_analysis(final_ticker_list, options)
-                if results:
-                    st.session_state.results = results
+                    # 分析ロジックをここに直接記述
+                    input_queries = [q.strip() for q in final_ticker_list.split(',') if q.strip()]
+                    target_stocks = [data_handler.get_ticker_info_from_query(q) for q in input_queries if data_handler.get_ticker_info_from_query(q)]
+                    unique_target_stocks = list({stock['code']: stock for stock in target_stocks}.values())
+                    
+                    progress_bar = st.progress(0)
+                    progress_text = st.empty()
+                    all_results = {}
+                    total_stocks = len(unique_target_stocks)
+                    
+                    data_handler._reset_session()
+                    for i, s_info in enumerate(unique_target_stocks):
+                        if i > 0 and (i % 4 == 0 or data_handler.session is None):
+                            data_handler._reset_session()
+                        
+                        progress_text.text(f"分析中... ({i+1}/{total_stocks}件完了): {s_info.get('name', '')} ({s_info['code']})")
+                        if data_handler.session is None:
+                            # エラー処理
+                            continue
+                        
+                        result = data_handler.perform_full_analysis(s_info['code'], options)
+                        result['sector'] = s_info.get('sector', '業種不明')
+                        result['sector_code'] = s_info.get('sector_code')
+                        display_key = f"{result.get('company_name', s_info['code'])} ({s_info['code']})"
+                        all_results[display_key] = result
+                        progress_bar.progress((i + 1) / total_stocks)
+                    
+                    progress_text.empty()
+                    progress_bar.empty()
+                    st.session_state.results = all_results
                     st.rerun()
 
-# 分析実行ボタンが押された時の処理
+                except Exception as e:
+                    # AI処理に特化したエラーメッセージ
+                    logger.error(f"AI検索処理中にエラーが発生しました: {e}", exc_info=True)
+                    status.update(label="❌ AI処理エラー", state="error", expanded=True)
+                    st.error(f"AI検索中にエラーが発生しました。APIキーが有効か、またはAPIの利用上限に達していないか確認してください。\n\n詳細: {e}")
+
+# ▼▼▼【修正箇所】シンプル検索ボタンの処理▼▼▼
 if analyze_button:
     st.session_state.ticker_input_value = ticker_input
-    results = run_stock_analysis(ticker_input, options)
-    if results:
-        st.session_state.results = results
+    input_queries = [q.strip() for q in ticker_input.split(',') if q.strip()]
+    if not input_queries:
+        st.error("銘柄コードまたは会社名を入力してください。")
+    else:
+        target_stocks = []
+        not_found_queries = []
+        with st.spinner("銘柄を検索しています..."):
+            for query in input_queries:
+                stock_info = data_handler.get_ticker_info_from_query(query)
+                if stock_info:
+                    target_stocks.append(stock_info)
+                else:
+                    not_found_queries.append(query)
+        
+        unique_target_stocks = list({stock['code']: stock for stock in target_stocks}.values())
+        if not_found_queries:
+            st.warning(f"以下の銘柄は見つかりませんでした: {', '.join(not_found_queries)}")
+        
+        if not unique_target_stocks:
+            st.error("分析対象の銘柄が見つかりませんでした。")
+            st.session_state.results = None
+        else:
+            st.success(f"分析対象: {', '.join([s['code'] for s in unique_target_stocks])}")
+            
+            # 分析ロジックをここに直接記述
+            progress_bar = st.progress(0)
+            progress_text = st.empty()
+            all_results = {}
+            total_stocks = len(unique_target_stocks)
+            
+            data_handler._reset_session()
+            for i, s_info in enumerate(unique_target_stocks):
+                if i > 0 and (i % 4 == 0 or data_handler.session is None):
+                    data_handler._reset_session()
+
+                progress_text.text(f"分析中... ({i+1}/{total_stocks}件完了): {s_info.get('name', '')} ({s_info['code']})")
+
+                if data_handler.session is None:
+                    display_key = f"{s_info.get('name', s_info['code'])} ({s_info['code']})"
+                    all_results[display_key] = {'error': 'データ取得セッションの初期化に失敗しました。', 'company_name': s_info.get('name'), 'ticker_code': s_info['code']}
+                    progress_bar.progress((i + 1) / total_stocks)
+                    continue
+
+                result = data_handler.perform_full_analysis(s_info['code'], options)
+                result['sector'] = s_info.get('sector', '業種不明')
+                result['sector_code'] = s_info.get('sector_code')
+                display_key = f"{result.get('company_name', s_info['code'])} ({s_info['code']})"
+                all_results[display_key] = result
+                progress_bar.progress((i + 1) / total_stocks)
+            
+            progress_text.empty()
+            progress_bar.empty()
+            st.session_state.results = all_results
 
 # --- 結果表示 ---
 if st.session_state.results:
