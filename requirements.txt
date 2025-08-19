@@ -7,7 +7,7 @@ pandas>=1.5.0
 # Financial data from Yahoo Finance
 yfinance>=0.2.0
 # Advanced HTTP requests to avoid blocking
-curl-cffi==0.6.2
+curl-cffi
 
 # HTML parsing
 beautifulsoup4>=4.12.0
@@ -32,5 +32,6 @@ unicodedata2  # これは標準ライブラリではなく、必要に応じて�
 
 # AI-powered search feature (Gemini)
 google-generativeai>=0.4.0
+
 
 
