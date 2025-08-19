@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 from curl_cffi import requests as curl_requests
-from curl_cffi.requests.exceptions import ImpersonateError, HTTPError
+from curl_cffi.errors import CurlError
+from curl_cffi.requests.exceptions import HTTPError
 from bs4 import BeautifulSoup
 import logging
 import time
@@ -94,7 +95,7 @@ def get_supported_browsers():
             s.get("https://www.google.com", timeout=10)
             supported.append(browser)
             logger.info(f"  ✅ プロファイル '{browser}' はサポートされています。")
-        except ImpersonateError:
+        except CurlError:
             logger.warning(f"  ❌ プロファイル '{browser}' はサポートされていません。")
         except Exception as e:
             logger.warning(f"  ⚠️ プロファイル '{browser}' のテスト中にエラーが発生しました: {e}")
@@ -1706,4 +1707,5 @@ if st.session_state.results:
     else: st.warning("グラフを描画できる銘柄が選択されていません。")
 
 else:
+
     st.info("サイドバーから銘柄コードまたは会社名を入力して「分析実行」ボタンを押すか、「AI類似銘柄検索」をご利用ください。")
