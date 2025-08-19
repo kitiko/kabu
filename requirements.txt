@@ -1,4 +1,3 @@
-
 # Core application framework
 streamlit>=1.20.0
 
@@ -9,7 +8,7 @@ pandas>=1.5.0
 yfinance>=0.2.0
 
 # Advanced HTTP requests to avoid blocking
-curl-cffi>=0.6.0
+curl-cffi==0.6.2
 
 # HTML parsing
 beautifulsoup4>=4.12.0
@@ -25,7 +24,6 @@ matplotlib>=3.7.0
 
 # Displaying Japanese characters in matplotlib plots
 japanize-matplotlib>=1.2.0
+
 # AI-powered search feature (Gemini)
 google-generativeai>=0.4.0
-
-
